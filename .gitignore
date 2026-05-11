@@ -1,3 +1,7 @@
+# Assemblies, Parts and STL files
+STLs/
+Parts and Assemblies/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
