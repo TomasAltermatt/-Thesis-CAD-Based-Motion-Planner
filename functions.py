@@ -61,6 +61,16 @@ def check_2d_aabb_overlap(bounds_a, bounds_b, extraction_axis):
     elif b_min_w >= a_max_w:
         return 1 # Part A cannot be extracted in extraction direction without colliding with B, 
                  # but can be extracted in the opposite direction
+    else:
+        return 2 # Part A cannot be extracted in either direction without colliding with B
+    
+    # Note: The return values are as follows:
+    #  0: No overlap at all (AABBs don't even touch)
+    # -2: AABBs overlap but COAABBs do not (We need to check PFs)
+    # -1: A can be extracted in the positive extraction direction without colliding with B
+    #  1: A cannot be extracted in the positive extraction direction without colliding with B, 
+    #    but can be extracted in the negative direction
+    #  2: A cannot be extracted in either direction without colliding with B
 
 
 
@@ -71,8 +81,8 @@ def check_COAABB_overlap(a_lims, b_lims, epsilon = 0.05):
     b_min_v, b_max_v = b_lims[1]
 
     # Define lu and lv
-    lu = (b_max_u - b_min_u) if (b_max_u - b_min_u) <= (a_max_u - a_min_u) else (a_max_u - a_min_u)
-    lv = (b_max_v - b_min_v) if (b_max_v - b_min_v) <= (a_max_v - a_min_v) else (a_max_v - a_min_v)
+    lu = min(b_max_u - b_min_u, a_max_u - a_min_u)
+    lv = min(b_max_v - b_min_v, a_max_v - a_min_v)
 
     # Conditions for COAABB overlap
     cond1 = (a_min_u - b_min_u) >= -epsilon*lu and (b_min_v - a_min_v) >= -epsilon*lv
