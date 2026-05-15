@@ -1,5 +1,6 @@
 import trimesh
 import pyvista as pv
+import numpy as np
 # ----------------------------------------------------- MAIN FUNCTIONS ----------------------------------------------
 ## AABB overlap test functions
 
@@ -117,45 +118,64 @@ def check_facet_intersection(part_a, part_b):
 
 if __name__ == "__main__":
 
-    # 1. Load your individual facet models
-    # Replace these strings with the actual names of your STL files
+    # Load models using trimesh
     part_a = trimesh.load('STLs/Test Assembly - Lid-1.STL')
     part_b = trimesh.load('STLs/Test Assembly - Pen-1.STL')
 
-    #print(dir(part_a))
-
-    # 2. Get the solid bounding boxes
+    # Get the solid bounding boxes
     bbox_a = part_a.bounding_box
     bbox_b = part_b.bounding_box
 
-    # 3. Wrap the trimesh objects so PyVista can read them
-    pv_a = pv.wrap(part_a)
-    pv_b = pv.wrap(part_b)
-    pv_bbox_a = pv.wrap(bbox_a)
-    pv_bbox_b = pv.wrap(bbox_b)
+    # Get Oriented bounding box with respect to part a
+    to_origin_A, extents_A = trimesh.bounds.oriented_bounds(part_a)
+    from_origin_A = np.linalg.inv(to_origin_A)
 
-    # 4. Set up the modern PyVista Plotter
-    plotter = pv.Plotter()
+    # Get directions of the OBB axes for part_a
+    local_x_dir = from_origin_A[:3, 0]
+    local_y_dir = from_origin_A[:3, 1]
+    local_z_dir = from_origin_A[:3, 2]
+    center_point = from_origin_A[:3, 3]
 
-    # Add the solid parts (Let's make the Lid slightly transparent too!)
-    plotter.add_mesh(pv_a, color='lightgray', opacity=0.6)
-    plotter.add_mesh(pv_b, color='blue', opacity=1.0)
+    # Create auxiliary copies (to avoid modifying the original meshes)
+    part_a_aux = part_a.copy()
+    part_b_aux = part_b.copy()
 
-    # Add the Bounding Boxes strictly as WIREFRAMES
-    # This guarantees they will never hide the parts inside them
-    plotter.add_mesh(pv_bbox_a, style='wireframe', color='red', line_width=2)
-    plotter.add_mesh(pv_bbox_b, style='wireframe', color='green', line_width=3)
+    # Apply transformation to align part_a with the world axes (so its OBB becomes an AABB)
+    part_a_aux.apply_transform(to_origin_A)
+    part_b_aux.apply_transform(to_origin_A)
 
-    # Show the interactive window
-    plotter.show()
 
 
     # --- Let's test it on your data! ---
 
+    # Test extraction along the X-axis (Index 0)
+    x_overlap = check_2d_aabb_overlap(part_a_aux.bounds, part_b_aux.bounds, extraction_axis="x")
+    print(f"Do the 2D shadows overlap in the X-extraction path? {x_overlap}")
+    # Test extraction along the Y-axis (Index 1)
+    y_overlap = check_2d_aabb_overlap(part_a_aux.bounds, part_b_aux.bounds, extraction_axis="y")
+    print(f"Do the 2D shadows overlap in the Y-extraction path? {y_overlap}")
     # Test extraction along the Z-axis (Index 2)
-    z_overlap = check_2d_aabb_overlap(part_a.bounds, part_b.bounds, extraction_axis=2)
+    z_overlap = check_2d_aabb_overlap(part_a_aux.bounds, part_b_aux.bounds, extraction_axis="z")
     print(f"Do the 2D shadows overlap in the Z-extraction path? {z_overlap}")
 
-    # Test extraction along the X-axis (Index 0)
-    x_overlap = check_2d_aabb_overlap(part_a.bounds, part_b.bounds, extraction_axis=0)
-    print(f"Do the 2D shadows overlap in the X-extraction path? {x_overlap}")
+    # --- 5. PyVista Visualization ---
+    # Let's draw the part and the 3 extraction arrows!
+
+    plotter = pv.Plotter()
+    plotter.add_mesh(pv.wrap(part_a), color="lightgray", opacity=0.8)
+    plotter.add_mesh(pv.wrap(part_b), color="lightblue", opacity=0.8)
+
+    # Add an arrow for the Local X-axis (Red)
+    arrow_x = pv.Arrow(start=center_point, direction=local_x_dir, scale=10)
+    plotter.add_mesh(arrow_x, color='red')
+
+    # Add an arrow for the Local Y-axis (Green)
+    arrow_y = pv.Arrow(start=center_point, direction=local_y_dir, scale=10)
+    plotter.add_mesh(arrow_y, color='green')
+
+    # Add an arrow for the Local Z-axis (Blue)
+    arrow_z = pv.Arrow(start=center_point, direction=local_z_dir, scale=10)
+    plotter.add_mesh(arrow_z, color='blue')
+
+    # Show the interactive window
+    plotter.show()
