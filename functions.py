@@ -5,6 +5,7 @@ import numpy as np
 ## AABB overlap test functions
 
 def check_2d_aabb_overlap(bounds_a, bounds_b, extraction_axis):
+    result = {}
     # Note: This check considers the bounding boxes as inputted here, so the orientation depends
     # on how the bounds are defined before calling the function. 
     # For this check it's based on the oriented bounding boxes of part_a, and part_b is transformed
@@ -16,6 +17,7 @@ def check_2d_aabb_overlap(bounds_a, bounds_b, extraction_axis):
     and checks if the 2D rectangles overlap.
     extraction_axis: 0 for X, 1 for Y, 2 for Z
     """
+
     # Figure out which two axes form our 2D "shadow" plane
     # If we extract in Z (2), our 2D plane uses X (0) and Y (1).
     axis_idx = {"x": 0, "y": 1, "z": 2}
@@ -40,31 +42,39 @@ def check_2d_aabb_overlap(bounds_a, bounds_b, extraction_axis):
     overlap_min_v = max(a_min_v, b_min_v)
     overlap_max_v = min(a_max_v, b_max_v)
 
-    # If AABBs dont overlap then they dont collide so we return immediately
+    result['overlap_u'] = (overlap_min_u, overlap_max_u)
+    result['overlap_v'] = (overlap_min_v, overlap_max_v)
+
+    # Case 1: Overlap does not exist at all (AABBs don't even touch)  --> Return 0
     if not ((overlap_min_u <= overlap_max_u) and (overlap_min_v <= overlap_max_v)):
-        return 0  # No overlap
+        result['overlap_result'] = 0  # No overlap
+        return result
     
-    # AABBs overlap, now we check COAABB overlap
+    # Check COAABB overlap
     a_lims = [(a_min_u, a_max_u), (a_min_v, a_max_v)]
     b_lims = [(b_min_u, b_max_u), (b_min_v, b_max_v)]
     coaabb_overlap = check_COAABB_overlap(a_lims, b_lims)
 
-    # If the COAABBs don't overlap, we can return -2 to indicate that we need to check the PFs
+    # Case 2: AABBs overlap but COAABBs do not (We need to check PFs) --> Return -2
     if not coaabb_overlap:
-        return -2 
+        result['overlap_result'] = -2
+        return result
 
     a_min_w, a_max_w = bounds_a[0][extraction_axis], bounds_a[1][extraction_axis]
     b_min_w, b_max_w = bounds_b[0][extraction_axis], bounds_b[1][extraction_axis]
 
+    # Case 3: AABBs overlap and COAABBs overlap
     if a_min_w >= b_max_w:
-        return -1 # Part A can be extracted in extraction direction without colliding with B, 
-                  # but not in the opposite direction
+         result['overlap_result'] = -1 # Part A can be extracted in extraction direction without colliding with B, 
+                                       # but not in the opposite direction
     elif b_min_w >= a_max_w:
-        return 1 # Part A cannot be extracted in extraction direction without colliding with B, 
-                 # but can be extracted in the opposite direction
+        result['overlap_result'] = 1   # Part A cannot be extracted in extraction direction without colliding with B, 
+                                       # but can be extracted in the opposite direction
     else:
-        return 2 # Part A cannot be extracted in either direction without colliding with B
-    
+        result['overlap_result'] = 2   # Part A cannot be extracted in either direction without colliding with B
+
+    return result
+
     # Note: The return values are as follows:
     #  0: No overlap at all (AABBs don't even touch)
     # -2: AABBs overlap but COAABBs do not (We need to check PFs)
@@ -112,6 +122,17 @@ def check_facet_intersection(part_a, part_b):
     ## Need to implement
     return
 
+def main_extraction_check(part_a, part_b,):
+    # Get the solid bounding boxes
+    bbox_a = part_a.bounding_box
+    bbox_b = part_b.bounding_box
+
+    # Get Oriented bounding box with respect to part a
+    to_origin_A, extents_A = trimesh.bounds.oriented_bounds(part_a)
+    from_origin_A = np.linalg.inv(to_origin_A)
+
+
+    return
 
 # ----------------------------------------------------- COMPLEMENTARY FUNCTIONS ---------------------------------------------- 
 
