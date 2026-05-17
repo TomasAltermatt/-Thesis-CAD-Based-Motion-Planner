@@ -1,6 +1,8 @@
 import trimesh
 import pyvista as pv
 import numpy as np
+import networkx as nx
+from classes import PseudoFace
 # ----------------------------------------------------- MAIN FUNCTIONS ----------------------------------------------
 ## AABB overlap test functions
 
@@ -116,9 +118,11 @@ def filter_facets(part, extraction_axis, overlap_region, tolerance = 1e-4):
 
     # Get face normals for the part in line with the extraction axis
     normals_w = part.face_normals[:, axis_idx[extraction_axis]]
+    #print(normals_w)
     valid_faces_mask = np.abs(normals_w) > tolerance
+    #print(valid_faces_mask)
 
-    # Get triangles of the part
+    # Get triangles of the part (indexes are [face index, vertex index, coordinate index])
     triangles_u = part.triangles[:, :, u_axis]
     triangles_v = part.triangles[:, :, v_axis]
 
@@ -133,12 +137,34 @@ def filter_facets(part, extraction_axis, overlap_region, tolerance = 1e-4):
     in_sr_v = (facet_min_v <= overlap_v_max) & (facet_max_v >= overlap_v_min)
 
     valid_faces_mask = valid_faces_mask & in_sr_u & in_sr_v
-    
-    return valid_faces_mask
+    valid_face_indices = np.where(valid_faces_mask)[0]
 
-def create_PFs(bounds_a, bounds_b):
-    ## Need to implement
-    return
+    return valid_face_indices
+
+def create_PFs(part: trimesh.Trimesh, extraction_axis: str, tolerance = 1e-4):
+    axis_idx = {"x": 0, "y": 1, "z": 2}
+    all_axes = [0, 1, 2]
+    all_axes.remove(axis_idx[extraction_axis])
+    u_axis = all_axes[0]
+    v_axis = all_axes[1]
+
+    # Get face normals for the part in line with the extraction axis
+    normals_w = part.face_normals[:, axis_idx[extraction_axis]]
+    valid_faces_mask = np.abs(normals_w) > tolerance
+    valid_face_indices = np.where(valid_faces_mask)[0]
+    
+    # Check if the left and right triangles of face adjacency are valid
+    left_valid_mask = np.isin(part.face_adjacency[:, 0], valid_face_indices)
+    right_valid_mask = np.isin(part.face_adjacency[:, 1], valid_face_indices)
+    both_valid_mask = left_valid_mask & right_valid_mask
+
+    valid_pairs = part.face_adjacency[both_valid_mask]
+
+    # Create graph to find connected triangles via valid_pairs
+    G = nx.Graph()
+    G.add_edges_from(valid_pairs)
+
+    return [PseudoFace(part, c, extraction_axis) for c in list(nx.connected_components(G))]
 
 def check_PF_overlap(pf_a, pf_b):
     ## Need to implement
@@ -161,6 +187,59 @@ def main_extraction_check(part_a, part_b,):
 
     return
 
+## Auxiliary visualization Functions with pyvista
+def visualize_pseudofaces(part, pseudo_faces_list):
+    """
+    Renders the full part in transparent gray, and paints each 
+    Pseudo Face object a different solid color.
+    """
+    # 1. Convert the trimesh object to a pyvista object
+    mesh = pv.wrap(part)
+    
+    # 2. Set up the 3D window
+    pl = pv.Plotter()
+    
+    # 3. Draw the original part as a faint "ghost" for context
+    pl.add_mesh(mesh, color='white', opacity=0.15)
+    
+    # 4. A list of bright colors to cycle through
+    colors = ['red', 'green', 'blue', 'yellow', 'magenta', 'cyan', 'orange']
+    
+    # 5. Loop through your instantiated PseudoFace objects
+    for i, pf in enumerate(pseudo_faces_list):
+        # Extract only the triangles that belong to this PF!
+        # Because we converted face_indices to a numpy array, this works instantly.
+        pf_mesh = mesh.extract_cells(pf.face_indices)
+        
+        # Pick a color (loops back to the start if you have more than 7 PFs)
+        c = colors[i % len(colors)]
+        
+        # Draw this specific PF solid and show its black triangle edges
+        pl.add_mesh(pf_mesh, color=c, show_edges=True, line_width=1)
+        
+    # Show the interactive window!
+    pl.show()
+
+
+def visualize_extraction_directions(part_a, part_b, local_x_dir, local_y_dir, local_z_dir, center_point):
+    plotter = pv.Plotter()
+    plotter.add_mesh(pv.wrap(part_a), color="lightgray", opacity=0.8)
+    plotter.add_mesh(pv.wrap(part_b), color="lightblue", opacity=0.8)
+
+    # Add an arrow for the Local X-axis (Red)
+    arrow_x = pv.Arrow(start=center_point, direction=local_x_dir, scale=10)
+    plotter.add_mesh(arrow_x, color='red')
+
+    # Add an arrow for the Local Y-axis (Green)
+    arrow_y = pv.Arrow(start=center_point, direction=local_y_dir, scale=10)
+    plotter.add_mesh(arrow_y, color='green')
+
+    # Add an arrow for the Local Z-axis (Blue)
+    arrow_z = pv.Arrow(start=center_point, direction=local_z_dir, scale=10)
+    plotter.add_mesh(arrow_z, color='blue')
+
+    # Show the interactive window
+    plotter.show()
 # ----------------------------------------------------- COMPLEMENTARY FUNCTIONS ---------------------------------------------- 
 
 
@@ -194,44 +273,9 @@ if __name__ == "__main__":
 
     # --- Let's test it on your data! ---
 
-    # Test extraction along the X-axis (Index 0)
-    x_overlap = check_2d_aabb_overlap(part_a_aux.bounds, part_b_aux.bounds, extraction_axis="x")
-    print(f"Do the 2D shadows overlap in the X-extraction path?\n {x_overlap}")
-    overlap_region, aabb_overlap_result = x_overlap
-
-
-    # Test facet filtering for the X-axis extraction
-    facet_mask_a = filter_facets(part_a_aux, "x", overlap_region)
-    facet_mask_b = filter_facets(part_b_aux, "x", overlap_region)
-
-    print(facet_mask_a)
-    print(facet_mask_b)
+    # Test Pseudo Face creation and visualization
+    pseudo_faces_a = create_PFs(part_a_aux, extraction_axis='y')
     
-    # # Test extraction along the Y-axis (Index 1)
-    # y_overlap = check_2d_aabb_overlap(part_a_aux.bounds, part_b_aux.bounds, extraction_axis="y")
-    # print(f"Do the 2D shadows overlap in the Y-extraction path? {y_overlap}")
-    # # Test extraction along the Z-axis (Index 2)
-    # z_overlap = check_2d_aabb_overlap(part_a_aux.bounds, part_b_aux.bounds, extraction_axis="z")
-    # print(f"Do the 2D shadows overlap in the Z-extraction path? {z_overlap}")
 
-    # # --- 5. PyVista Visualization ---
-    # # Let's draw the part and the 3 extraction arrows!
-
-    # plotter = pv.Plotter()
-    # plotter.add_mesh(pv.wrap(part_a), color="lightgray", opacity=0.8)
-    # plotter.add_mesh(pv.wrap(part_b), color="lightblue", opacity=0.8)
-
-    # # Add an arrow for the Local X-axis (Red)
-    # arrow_x = pv.Arrow(start=center_point, direction=local_x_dir, scale=10)
-    # plotter.add_mesh(arrow_x, color='red')
-
-    # # Add an arrow for the Local Y-axis (Green)
-    # arrow_y = pv.Arrow(start=center_point, direction=local_y_dir, scale=10)
-    # plotter.add_mesh(arrow_y, color='green')
-
-    # # Add an arrow for the Local Z-axis (Blue)
-    # arrow_z = pv.Arrow(start=center_point, direction=local_z_dir, scale=10)
-    # plotter.add_mesh(arrow_z, color='blue')
-
-    # # Show the interactive window
-    # plotter.show()
+    print(f"Number of Pseudo Faces created for Part A: {len(pseudo_faces_a)}")
+    visualize_pseudofaces(part_a_aux, pseudo_faces_a)
