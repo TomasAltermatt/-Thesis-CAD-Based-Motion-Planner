@@ -141,7 +141,7 @@ def filter_facets(part, extraction_axis, overlap_region, tolerance = 1e-4):
 
     return valid_face_indices
 
-def create_PFs(part: trimesh.Trimesh, extraction_axis: str, tolerance = 1e-4):
+def create_PFs(part: trimesh.Trimesh, extraction_axis: str, tolerance = 5e-1):
     axis_idx = {"x": 0, "y": 1, "z": 2}
     all_axes = [0, 1, 2]
     all_axes.remove(axis_idx[extraction_axis])
@@ -220,7 +220,6 @@ def visualize_pseudofaces(part, pseudo_faces_list):
     # Show the interactive window!
     pl.show()
 
-
 def visualize_extraction_directions(part_a, part_b, local_x_dir, local_y_dir, local_z_dir, center_point):
     plotter = pv.Plotter()
     plotter.add_mesh(pv.wrap(part_a), color="lightgray", opacity=0.8)
@@ -274,8 +273,10 @@ if __name__ == "__main__":
     # --- Let's test it on your data! ---
 
     # Test Pseudo Face creation and visualization
-    pseudo_faces_a = create_PFs(part_a_aux, extraction_axis='y')
-    
+    pseudo_faces_a = create_PFs(part_a_aux, extraction_axis='x')
+    pseudo_faces_b = create_PFs(part_b_aux, extraction_axis='x')
 
     print(f"Number of Pseudo Faces created for Part A: {len(pseudo_faces_a)}")
+    print(f"Number of Pseudo Faces created for Part B: {len(pseudo_faces_b)}")
     visualize_pseudofaces(part_a_aux, pseudo_faces_a)
+    visualize_pseudofaces(part_b_aux, pseudo_faces_b)
