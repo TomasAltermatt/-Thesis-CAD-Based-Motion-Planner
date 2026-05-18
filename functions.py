@@ -3,6 +3,8 @@ import pyvista as pv
 import numpy as np
 import networkx as nx
 from classes import PseudoFace
+from shapely.geometry import Polygon
+
 # ----------------------------------------------------- MAIN FUNCTIONS ----------------------------------------------
 ## AABB overlap test functions
 
@@ -84,7 +86,6 @@ def check_2d_aabb_overlap(bounds_a, bounds_b, extraction_axis):
     #  1: A cannot be extracted in the positive extraction direction without colliding with B, 
     #    but can be extracted in the negative direction
     #  2: A cannot be extracted in either direction without colliding with B
-
 
 
 def check_COAABB_overlap(a_lims, b_lims, epsilon = 0.05):
@@ -170,10 +171,60 @@ def check_PF_overlap(pf_a, pf_b):
     return
 
 ## Facet projection intersection test functions
-def check_facet_intersection(part_a, part_b):
-    ## Need to implement
-    return
+def focus_facet_intersection_test(pf_a: PseudoFace, pf_b: PseudoFace, direction: str):
+    "Checks if any of the focus facets of PseudoFace of part A intersects with any of those of part B"
+    "Direction is either '+w' or '-w' depending on whether we are checking the positive or negative extraction direction"
+    "Returns:"
+    "   0 if no collision detected between any of the focus facets"
+    "   1 if A cannot be extracted in the positive direction without colliding with B, but can be extracted in the negative direction"
+    "  -1 if A cannot be extracted in the negative direction without colliding with B, but can be extracted in the positive direction"
+    
+    # First we test the AABBs of the candidates in 2D
+    for facet_a in pf_a.focus_facets:
+        coords_2d_a = pf_a.triangles_2d[facet_a]
+        min_u_a, min_v_a = coords_2d_a.min(axis=0)
+        max_u_a, max_v_a = coords_2d_a.max(axis=0)
 
+        for facet_b in pf_b.focus_facets:
+            coords_2d_b = pf_b.triangles_2d[facet_b]
+            min_u_b, min_v_b = coords_2d_b.min(axis=0)
+            max_u_b, max_v_b = coords_2d_b.max(axis=0)
+
+            # 1. Check if the AABBs of the facets overlap in 2D
+            # If the boxes don't overlap in U or V, they can't touch!
+            if (min_u_a > max_u_b or max_u_a < min_u_b or
+                min_v_a > max_v_b or max_v_a < min_v_b):
+                continue # Skip to the next pair instantly
+
+            # 2. Check 2D polygon intersection
+            poly_a = Polygon(coords_2d_a)
+            poly_b = Polygon(coords_2d_b)
+
+            if not poly_a.intersects(poly_b):
+                continue # If the 2D projections don't intersect, skip to the next pair
+
+            # 3. If theres a 2D intersection we check the depth to see if they collide in +/- w
+            extraction_axis = pf_a.extraction_axis
+            min_w_a = pf_a.triangles_3d[facet_a][:, extraction_axis].min()
+            max_w_a = pf_a.triangles_3d[facet_a][:, extraction_axis].max()
+            min_w_b = pf_b.triangles_3d[facet_b][:, extraction_axis].min()
+            max_w_b = pf_b.triangles_3d[facet_b][:, extraction_axis].max()
+
+            # Case a: Static overlap
+            if max_w_a >= min_w_b and min_w_a <= max_w_b:
+                return 2 # Collide instantly in both directions
+            
+            # Case b: I need to extract A in the positive direction, so I check if B is blocking that
+            if max_w_a <= min_w_b and direction == "+w":
+                return 1 # A cannot be extracted in the positive direction without colliding with B
+        
+            # Case c: I need to extract A in the negative direction, so I check if B is blocking that
+            if min_w_a >= max_w_b and direction == "-w":
+                return -1 # A cannot be extracted in the negative direction without colliding with B
+            
+    return 0 # No collision detected between any of the focus facets
+
+## Main extraction check function
 def main_extraction_check(part_a, part_b,):
     # Get the solid bounding boxes
     bbox_a = part_a.bounding_box
