@@ -141,7 +141,7 @@ def filter_facets(part, extraction_axis, overlap_region, tolerance = 1e-4):
 
     return valid_face_indices
 
-def create_PFs(part: trimesh.Trimesh, extraction_axis: str, tolerance = 5e-1):
+def create_PFs(part: trimesh.Trimesh, extraction_axis: str, tolerance = 1e-4):
     axis_idx = {"x": 0, "y": 1, "z": 2}
     all_axes = [0, 1, 2]
     all_axes.remove(axis_idx[extraction_axis])
@@ -157,7 +157,6 @@ def create_PFs(part: trimesh.Trimesh, extraction_axis: str, tolerance = 5e-1):
     left_valid_mask = np.isin(part.face_adjacency[:, 0], valid_face_indices)
     right_valid_mask = np.isin(part.face_adjacency[:, 1], valid_face_indices)
     both_valid_mask = left_valid_mask & right_valid_mask
-
     valid_pairs = part.face_adjacency[both_valid_mask]
 
     # Create graph to find connected triangles via valid_pairs
@@ -220,7 +219,7 @@ def visualize_pseudofaces(part, pseudo_faces_list):
     # Show the interactive window!
     pl.show()
 
-def visualize_extraction_directions(part_a, part_b, local_x_dir, local_y_dir, local_z_dir, center_point):
+def visualize_extraction_directions(part_a, part_b, local_x_dir = [1, 0, 0], local_y_dir = [0, 1, 0], local_z_dir = [0, 0, 1], center_point = [0, 0, 0]):
     plotter = pv.Plotter()
     plotter.add_mesh(pv.wrap(part_a), color="lightgray", opacity=0.8)
     plotter.add_mesh(pv.wrap(part_b), color="lightblue", opacity=0.8)
@@ -239,18 +238,24 @@ def visualize_extraction_directions(part_a, part_b, local_x_dir, local_y_dir, lo
 
     # Show the interactive window
     plotter.show()
+
+def visualize_narrow_phase(pseudo_faces, overlap_region):
+    plotter = pv.Plotter()
+    for i, pf in enumerate(pseudo_faces):
+        if i == 0:
+            pf.visualize_focus_facets(overlap_region, plotter)
+        else:
+            pf.visualize_focus_facets(overlap_region, plotter, show_SR_box=False)
+    plotter.show()
 # ----------------------------------------------------- COMPLEMENTARY FUNCTIONS ---------------------------------------------- 
 
-
+# For the loop i need to revert the transformation applied to part_b so i
+# can get extraction directions in the original frame
 if __name__ == "__main__":
 
     # Load models using trimesh
-    part_a = trimesh.load('STLs/Test Assembly - Lid-1.STL')
-    part_b = trimesh.load('STLs/Test Assembly - Pen-1.STL')
-
-    # Get the solid bounding boxes
-    bbox_a = part_a.bounding_box
-    bbox_b = part_b.bounding_box
+    part_a = trimesh.load('STLs/Ensamblaje1 - Lid-1.STL')
+    part_b = trimesh.load('STLs/Ensamblaje1 - Pen-1.STL')
 
     # Get Oriented bounding box with respect to part a
     to_origin_A, extents_A = trimesh.bounds.oriented_bounds(part_a)
@@ -270,13 +275,28 @@ if __name__ == "__main__":
     part_a_aux.apply_transform(to_origin_A)
     part_b_aux.apply_transform(to_origin_A)
 
+    # Get the solid bounding boxes
+    bbox_a = part_a_aux.bounding_box
+    bbox_b = part_b_aux.bounding_box
+
     # --- Let's test it on your data! ---
+    visualize_extraction_directions(part_a_aux, part_b_aux)
+    axis_test = input("Enter the extraction axis (x, y, or z): ").lower()
+
+    # 1. Check AABB and COAABB overlap
+    overlap_region, overlap_result = check_2d_aabb_overlap(bbox_a.bounds, bbox_b.bounds, extraction_axis=axis_test)
 
     # Test Pseudo Face creation and visualization
-    pseudo_faces_a = create_PFs(part_a_aux, extraction_axis='x')
-    pseudo_faces_b = create_PFs(part_b_aux, extraction_axis='x')
+    pseudo_faces_a = create_PFs(part_a_aux, extraction_axis=axis_test)
+    pseudo_faces_b = create_PFs(part_b_aux, extraction_axis=axis_test)
 
-    print(f"Number of Pseudo Faces created for Part A: {len(pseudo_faces_a)}")
-    print(f"Number of Pseudo Faces created for Part B: {len(pseudo_faces_b)}")
-    visualize_pseudofaces(part_a_aux, pseudo_faces_a)
-    visualize_pseudofaces(part_b_aux, pseudo_faces_b)
+    for pf in pseudo_faces_a:
+        pf.get_focus_facets(overlap_region)
+    for pf in pseudo_faces_b:
+        pf.get_focus_facets(overlap_region)
+
+    visualize_narrow_phase(pseudo_faces_a, overlap_region)
+    visualize_narrow_phase(pseudo_faces_b, overlap_region)
+
+
+
