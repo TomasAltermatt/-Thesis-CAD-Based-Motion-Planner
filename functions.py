@@ -69,11 +69,10 @@ def check_2d_aabb_overlap(bounds_a, bounds_b, extraction_axis):
     # Case 3: AABBs overlap and COAABBs overlap
     overlap_result = None
     if a_min_w >= b_max_w:
-         overlap_result = -1 # Part A can be extracted in extraction direction without colliding with B, 
-                                       # but not in the opposite direction
+         overlap_result = -1 # Part A cannot be extracted in the negative extraction direction without colliding with B
     elif b_min_w >= a_max_w:
         overlap_result = 1   # Part A cannot be extracted in extraction direction without colliding with B, 
-                                       # but can be extracted in the opposite direction
+
     else:
         overlap_result = 2   # Part A cannot be extracted in either direction without colliding with B
 
@@ -82,11 +81,10 @@ def check_2d_aabb_overlap(bounds_a, bounds_b, extraction_axis):
     # Note: The return values are as follows:
     #  0: No overlap at all (AABBs don't even touch)
     # -2: AABBs overlap but COAABBs do not (We need to check PFs)
-    # -1: A can be extracted in the positive extraction direction without colliding with B
+    # -1: A cannot be extracted in the negative extraction direction without colliding with B
     #  1: A cannot be extracted in the positive extraction direction without colliding with B, 
     #    but can be extracted in the negative direction
     #  2: A cannot be extracted in either direction without colliding with B
-
 
 def check_COAABB_overlap(a_lims, b_lims, epsilon = 0.05):
     a_min_u, a_max_u = a_lims[0]
@@ -166,11 +164,36 @@ def create_PFs(part: trimesh.Trimesh, extraction_axis: str, tolerance = 1e-4):
 
     return [PseudoFace(part, c, extraction_axis) for c in list(nx.connected_components(G))]
 
-def check_PF_overlap(pf_a, pf_b):
-    ## Need to implement
+def check_PF_overlap(pf_a: PseudoFace, pf_b: PseudoFace, direction: str):
+    # Pseudoface A bounding box 2D limits
+    min_u_a, min_v_a = pf_a.triangles_2d.min(axis=(0,1))
+    max_u_a, max_v_a = pf_a.triangles_2d.max(axis=(0,1))
+
+    # Pseudoface B bounding box 2D limits
+    min_u_b, min_v_b = pf_b.triangles_2d.min(axis=(0,1))
+    max_u_b, max_v_b = pf_b.triangles_2d.max(axis=(0,1))
+
+    # Calculate overlap region in 2D
+    overlap_min_u = max(min_u_a, min_u_b)
+    overlap_max_u = min(max_u_a, max_u_b)
+    overlap_min_v = max(min_v_a, min_v_b)
+    overlap_max_v = min(max_v_a, max_v_b)
+
+    # Check if the 2D bounding boxes of the pseudo-faces overlap
+    if not ((overlap_min_u <= overlap_max_u) and (overlap_min_v <= overlap_max_v)):
+        return [None, None, 0]
+    
+    # Check COAABB overlap
+    a_lims = [(min_u_a, max_u_a), (min_v_a, max_v_a)]
+    b_lims = [(min_u_b, max_u_b), (min_v_b, max_v_b)]
+    coaabb_overlap = check_COAABB_overlap(a_lims, b_lims)
+
+    if not coaabb_overlap:
+        return 
+
+
     return
 
-## Facet projection intersection test functions
 def focus_facet_intersection_test(pf_a: PseudoFace, pf_b: PseudoFace, direction: str):
     "Checks if any of the focus facets of PseudoFace of part A intersects with any of those of part B"
     "Direction is either '+w' or '-w' depending on whether we are checking the positive or negative extraction direction"
@@ -223,6 +246,58 @@ def focus_facet_intersection_test(pf_a: PseudoFace, pf_b: PseudoFace, direction:
                 return -1 # A cannot be extracted in the negative direction without colliding with B
             
     return 0 # No collision detected between any of the focus facets
+
+
+## Facet projection intersection test functions
+
+def check_static_interference(part_a, part_b):
+    "Checks if part_a and part_b are already colliding in their current position, means that they statically interfere"
+    collision_manager = trimesh.collision.CollisionManager()
+    collision_manager.add_object('part_a', part_a)
+    collision_manager.add_object('part_b', part_b)
+
+    is_colliding = collision_manager.in_collision_internal()
+    return is_colliding
+
+def hybrid_facet_intersection_test(part_a, part_b, facet_a, facet_b, MRT_tolerance = 1e-4):
+    # 1. Check AABB of facets in 3D to discard impossible pairs instantly
+    a_min = facet_a.min(axis=0)
+    a_max = facet_a.max(axis=0)
+    b_min = facet_b.min(axis=0)
+    b_max = facet_b.max(axis=0)
+
+    if (a_min[0] > b_max[0] or a_max[0] < b_min[0] or
+        a_min[1] > b_max[1] or a_max[1] < b_min[1] or
+        a_min[2] > b_max[2] or a_max[2] < b_min[2]):
+        return 0 # If the boxes don't overlap in any dimension, they can't touch!
+    
+    # Revise specific indexing since i dont yet know how to input the facets
+    poly_a = Polygon(facet_a[:, :2]) # Project to 2D (U and V)
+    poly_b = Polygon(facet_b[:, :2]) # Project to 2D (U and V)
+    
+    # 2. Check if there is static interference between the 2 parts
+    use_MRT = check_static_interference(part_a, part_b)
+
+    # 3. Case 1: If there is static interference we use MRT
+    if use_MRT:
+        overlap_poly = poly_a.intersection(poly_b)
+        min_u, min_v, max_u, max_v = overlap_poly.bounds
+
+        overlap_width = max_u - min_u
+        overlap_height = max_v - min_v
+
+        overlap_distance = min(overlap_width, overlap_height)
+        # check if 
+        if overlap_distance < MRT_tolerance:
+            return 1 # If the overlapping area is very small, we consider it a minor interference (1)
+        
+        return 2
+    
+    # 4. Case 2: If there is no static interference we check with standard collision tests with polygon intersection
+    if not poly_a.intersects(poly_b):
+        return 0 # If the 2D projections don't intersect, they can't collide
+    return 2
+
 
 ## Main extraction check function
 def main_extraction_check(part_a, part_b,):

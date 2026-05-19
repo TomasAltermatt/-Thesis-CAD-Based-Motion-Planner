@@ -7,6 +7,7 @@ class PseudoFace:
     def __init__(self, part, face_indices, extraction_axis):
         self.part = part
         self.face_indices = np.array(list(face_indices), dtype=int)
+        self.extraction_axis = axis_idx[extraction_axis]
         self.facets = []
         self.focus_facets = []
 
@@ -15,11 +16,8 @@ class PseudoFace:
         axis_idx = {"x": 0, "y": 1, "z": 2}
         all_axes = [0, 1, 2]
         all_axes.remove(axis_idx[extraction_axis])
-
-        # Define u,v and w axes based on the extraction axis
         self.u_axis, self.v_axis = all_axes[0], all_axes[1]
-        self.extraction_axis = axis_idx[extraction_axis]
-
+        
         # Calculate 2D coordinates by projecting 3D triangles on the extraction plane
         self.triangles_2d = self.triangles_3d[:, :, [self.u_axis, self.v_axis]]
 
@@ -57,7 +55,7 @@ class PseudoFace:
         final_mask = np.any(u_hits & v_hits, axis=1)
 
         self.focus_facets = np.where(final_mask)[0]
-        #print(f"Focus facets indices: {self.focus_facets}")
+        # print(f"Focus facets indices: {self.focus_facets}")
     
 
     def visualize_focus_facets(self, SR, plotter, show_SR_box=True, show = False):
