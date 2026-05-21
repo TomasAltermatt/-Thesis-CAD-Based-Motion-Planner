@@ -1,10 +1,11 @@
 import numpy as np
 import networkx as nx
 import pyvista as pv
+import trimesh
 
 
 class PseudoFace:
-    def __init__(self, part, face_indices, extraction_axis):
+    def __init__(self, part: trimesh.Trimesh, face_indices: list, extraction_axis: str):
         self.part = part
         self.face_indices = np.array(list(face_indices), dtype=int)
         self.extraction_axis = axis_idx[extraction_axis]

@@ -106,40 +106,6 @@ def check_COAABB_overlap(a_lims, b_lims, epsilon = 0.05):
 
 
 ## Pseudo Face overlap test functions
-def filter_facets(part, extraction_axis, overlap_region, tolerance = 1e-4):
-    # Figure out which two axes form our 2D "shadow" plane
-    # If we extract in Z (2), our 2D plane uses X (0) and Y (1).
-    axis_idx = {"x": 0, "y": 1, "z": 2}
-    all_axes = [0, 1, 2]
-    all_axes.remove(axis_idx[extraction_axis])
-    u_axis = all_axes[0]
-    v_axis = all_axes[1]
-
-    # Get face normals for the part in line with the extraction axis
-    normals_w = part.face_normals[:, axis_idx[extraction_axis]]
-    #print(normals_w)
-    valid_faces_mask = np.abs(normals_w) > tolerance
-    #print(valid_faces_mask)
-
-    # Get triangles of the part (indexes are [face index, vertex index, coordinate index])
-    triangles_u = part.triangles[:, :, u_axis]
-    triangles_v = part.triangles[:, :, v_axis]
-
-    facet_min_u, facet_max_u = np.min(triangles_u, axis=1), np.max(triangles_u, axis=1)
-    facet_min_v, facet_max_v = np.min(triangles_v, axis=1), np.max(triangles_v, axis=1)
-
-    overlap_u_min, overlap_u_max = overlap_region['overlap_u']
-    overlap_v_min, overlap_v_max = overlap_region['overlap_v']
-
-    # Check if the facet's projection overlaps with the overlap region
-    in_sr_u = (facet_min_u <= overlap_u_max) & (facet_max_u >= overlap_u_min)
-    in_sr_v = (facet_min_v <= overlap_v_max) & (facet_max_v >= overlap_v_min)
-
-    valid_faces_mask = valid_faces_mask & in_sr_u & in_sr_v
-    valid_face_indices = np.where(valid_faces_mask)[0]
-
-    return valid_face_indices
-
 def create_PFs(part: trimesh.Trimesh, extraction_axis: str, tolerance = 1e-4):
     axis_idx = {"x": 0, "y": 1, "z": 2}
     all_axes = [0, 1, 2]
@@ -248,6 +214,17 @@ def focus_facet_intersection_test(pf_a: PseudoFace, pf_b: PseudoFace, direction:
     return 0 # No collision detected between any of the focus facets
 
 
+## Determine if parts intersect their AABBs
+def check_3D_AABB_intersection(part_a, part_b):
+    a_min_3d = part_a.bounds[0]
+    a_max_3d = part_a.bounds[1]
+    b_min_3d = part_b.bounds[0]
+    b_max_3d = part_b.bounds[1]
+
+    if np.any(a_min_3d > b_max_3d) or np.any(a_max_3d < b_min_3d):
+        return [None, None, False]
+    return [(a_min_3d, a_max_3d), (b_min_3d, b_max_3d), True]
+
 ## Facet projection intersection test functions
 
 def check_static_interference(part_a, part_b):
@@ -258,6 +235,59 @@ def check_static_interference(part_a, part_b):
 
     is_colliding = collision_manager.in_collision_internal()
     return is_colliding
+
+def filter_facets(pf_a, pf_b, AABB_3d_intersection, tolerance = 1e-4):
+    w_idx = pf_a.extraction_axis # Same for both pf_a or pf_b
+    a_min_3d, a_max_3d = AABB_3d_intersection[0]
+    b_min_3d, b_max_3d = AABB_3d_intersection[1]
+    parts_intersect = AABB_3d_intersection[2]
+    
+    w1_max = b_max_3d[w_idx]
+    w0_min = a_min_3d[w_idx]
+
+    candidates_a = []
+    candidates_b = []
+
+    for local_idx in range(len(pf_a.triangles_3d)):
+        facet_a = pf_a.triangles_3d[local_idx]
+        min_w = facet_a[:, w_idx].min()
+        max_w = facet_a[:, w_idx].max()
+        normal_w = pf_a.part.face_normals[local_idx][w_idx]
+
+        # If the parts dont intersect we check those with normals pointing towards the extraction direction
+        if not parts_intersect:
+            if abs(normal_w) > 0:
+                candidates_a.append(local_idx)
+        
+        # If they do intersect we filter according to facet normals
+        else:
+            if max_w >= w0_min and normal_w > 0:
+                candidates_a.append(local_idx)
+            elif min_w < w1_max and normal_w < 0:
+                candidates_a.append(local_idx)
+
+    
+    for local_idx in range(len(pf_b.triangles_3d)):
+        facet_b = pf_b.triangles_3d[local_idx]
+        min_w = facet_b[:, w_idx].min()
+        max_w = facet_b[:, w_idx].max()
+        normal_w = pf_b.part.face_normals[local_idx][w_idx]
+
+        # If the parts dont intersect we check those with normals pointing towards the extraction direction
+        if not parts_intersect:
+            if abs(normal_w) > 0:
+                candidates_b.append(local_idx)
+        
+        # If they do intersect we filter according to facet normals
+        else:
+            if max_w > w0_min and normal_w > 0:
+                candidates_b.append(local_idx)
+            elif min_w <= w0_min and normal_w < 0:
+                candidates_b.append(local_idx)
+
+    return candidates_a, candidates_b
+
+
 
 def hybrid_facet_intersection_test(part_a, part_b, facet_a, facet_b, MRT_tolerance = 1e-4):
     # 1. Check AABB of facets in 3D to discard impossible pairs instantly
@@ -405,24 +435,26 @@ if __name__ == "__main__":
     bbox_a = part_a_aux.bounding_box
     bbox_b = part_b_aux.bounding_box
 
-    # --- Let's test it on your data! ---
-    visualize_extraction_directions(part_a_aux, part_b_aux)
-    axis_test = input("Enter the extraction axis (x, y, or z): ").lower()
 
-    # 1. Check AABB and COAABB overlap
-    overlap_region, overlap_result = check_2d_aabb_overlap(bbox_a.bounds, bbox_b.bounds, extraction_axis=axis_test)
 
-    # Test Pseudo Face creation and visualization
-    pseudo_faces_a = create_PFs(part_a_aux, extraction_axis=axis_test)
-    pseudo_faces_b = create_PFs(part_b_aux, extraction_axis=axis_test)
+    # # --- Let's test it on your data! ---
+    # visualize_extraction_directions(part_a_aux, part_b_aux)
+    # axis_test = input("Enter the extraction axis (x, y, or z): ").lower()
 
-    for pf in pseudo_faces_a:
-        pf.get_focus_facets(overlap_region)
-    for pf in pseudo_faces_b:
-        pf.get_focus_facets(overlap_region)
+    # # 1. Check AABB and COAABB overlap
+    # overlap_region, overlap_result = check_2d_aabb_overlap(bbox_a.bounds, bbox_b.bounds, extraction_axis=axis_test)
 
-    visualize_narrow_phase(pseudo_faces_a, overlap_region)
-    visualize_narrow_phase(pseudo_faces_b, overlap_region)
+    # # Test Pseudo Face creation and visualization
+    # pseudo_faces_a = create_PFs(part_a_aux, extraction_axis=axis_test)
+    # pseudo_faces_b = create_PFs(part_b_aux, extraction_axis=axis_test)
+
+    # for pf in pseudo_faces_a:
+    #     pf.get_focus_facets(overlap_region)
+    # for pf in pseudo_faces_b:
+    #     pf.get_focus_facets(overlap_region)
+
+    # visualize_narrow_phase(pseudo_faces_a, overlap_region)
+    # visualize_narrow_phase(pseudo_faces_b, overlap_region)
 
 
 
