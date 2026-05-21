@@ -131,34 +131,57 @@ def create_PFs(part: trimesh.Trimesh, extraction_axis: str, tolerance = 1e-4):
     return [PseudoFace(part, c, extraction_axis) for c in list(nx.connected_components(G))]
 
 def check_PF_overlap(pf_a: PseudoFace, pf_b: PseudoFace, direction: str):
-    # Pseudoface A bounding box 2D limits
-    min_u_a, min_v_a = pf_a.triangles_2d.min(axis=(0,1))
-    max_u_a, max_v_a = pf_a.triangles_2d.max(axis=(0,1))
+    # Dynamic axis selection using the class attribute
+    axis_idx = {"x": 0, "y": 1, "z": 2}
+    w_idx = axis_idx[pf_a.extraction_axis]
 
-    # Pseudoface B bounding box 2D limits
-    min_u_b, min_v_b = pf_b.triangles_2d.min(axis=(0,1))
-    max_u_b, max_v_b = pf_b.triangles_2d.max(axis=(0,1))
+    # Pseudoface A bounding box 2D limits and dynamic depth limits
+    a_min_u, a_min_v = pf_a.triangles_2d.min(axis=(0,1))
+    a_max_u, a_max_v = pf_a.triangles_2d.max(axis=(0,1))
+    
+    # Squash axis 0 (triangles) and axis 1 (vertices) to get true 3D bounding box
+    a_min_w = pf_a.triangles_3d[:, :, w_idx].min()
+    a_max_w = pf_a.triangles_3d[:, :, w_idx].max()
+
+    # Pseudoface B bounding box 2D limits and dynamic depth limits
+    b_min_u, b_min_v = pf_b.triangles_2d.min(axis=(0,1))
+    b_max_u, b_max_v = pf_b.triangles_2d.max(axis=(0,1))
+    
+    b_min_w = pf_b.triangles_3d[:, :, w_idx].min()
+    b_max_w = pf_b.triangles_3d[:, :, w_idx].max()
 
     # Calculate overlap region in 2D
-    overlap_min_u = max(min_u_a, min_u_b)
-    overlap_max_u = min(max_u_a, max_u_b)
-    overlap_min_v = max(min_v_a, min_v_b)
-    overlap_max_v = min(max_v_a, max_v_b)
+    overlap_min_u = max(a_min_u, b_min_u)
+    overlap_max_u = min(a_max_u, b_max_u)
+    overlap_min_v = max(a_min_v, b_min_v)
+    overlap_max_v = min(a_max_v, b_max_v)
 
-    # Check if the 2D bounding boxes of the pseudo-faces overlap
+    # Filter 2: Check if the 2D bounding boxes of the pseudo-faces overlap
     if not ((overlap_min_u <= overlap_max_u) and (overlap_min_v <= overlap_max_v)):
-        return [None, None, 0]
+        return 0 # No overlap in 2D, they cannot collide.
     
     # Check COAABB overlap
-    a_lims = [(min_u_a, max_u_a), (min_v_a, max_v_a)]
-    b_lims = [(min_u_b, max_u_b), (min_v_b, max_v_b)]
+    a_lims = [(a_min_u, a_max_u), (a_min_v, a_max_v)]
+    b_lims = [(b_min_u, b_max_u), (b_min_v, b_max_v)]
     coaabb_overlap = check_COAABB_overlap(a_lims, b_lims)
 
     if not coaabb_overlap:
-        return 
+        # AABBs overlap roughly, but the tighter COAABBs missed each other. Safe.
+        return 0 
+    
+    # Static Overlap Check: If they are clashing right now, it blocks both directions!
+    if a_max_w >= b_min_w and a_min_w <= b_max_w:
+        return 2  # Hard static collision! Blocked.
 
+    # Directional macro-blocking check
+    if a_min_w >= b_max_w and direction == "-w":
+        return -1 # Blocked in negative direction
+    elif b_min_w >= a_max_w and direction == "+w":
+        return 1  # Blocked in positive direction
 
-    return
+    # If it hasn't returned yet, it means the macro shapes overlap in 2D, but their 
+    # depths are inconclusive (undetermined). We MUST run the individual facet tests.
+    return -2 # Undetermined, we need to check the focus facets in detail.
 
 def focus_facet_intersection_test(pf_a: PseudoFace, pf_b: PseudoFace, direction: str):
     "Checks if any of the focus facets of PseudoFace of part A intersects with any of those of part B"
