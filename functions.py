@@ -3,7 +3,7 @@ import pyvista as pv
 import numpy as np
 import networkx as nx
 from classes import PseudoFace
-from shapely.geometry import Polygon
+from shapely.geometry import Polygon, MultiPolygon, GeometryCollection, LineString, Point
 
 # ----------------------------------------------------- MAIN FUNCTIONS ----------------------------------------------
 ## AABB overlap test functions
@@ -311,7 +311,6 @@ def filter_facets(pf_a, pf_b, AABB_3d_intersection, tolerance = 1e-4):
     return candidates_a, candidates_b
 
 
-
 def hybrid_facet_intersection_test(part_a, part_b, facet_a, facet_b, MRT_tolerance = 1e-4):
     # 1. Check AABB of facets in 3D to discard impossible pairs instantly
     a_min = facet_a.min(axis=0)
@@ -340,7 +339,7 @@ def hybrid_facet_intersection_test(part_a, part_b, facet_a, facet_b, MRT_toleran
         overlap_height = max_v - min_v
 
         overlap_distance = min(overlap_width, overlap_height)
-        # check if 
+         
         if overlap_distance < MRT_tolerance:
             return 1 # If the overlapping area is very small, we consider it a minor interference (1)
         
@@ -351,6 +350,38 @@ def hybrid_facet_intersection_test(part_a, part_b, facet_a, facet_b, MRT_toleran
         return 0 # If the 2D projections don't intersect, they can't collide
     return 2
 
+def get_primitive_points(poly_a: Polygon, poly_b: Polygon):
+    if not poly_a.intersects(poly_b):
+            return np.empty((0, 2))
+
+    overlap = poly_a.intersection(poly_b)
+    raw_coords = []
+
+    # Case A: Standard single overlapping polygon area
+    if isinstance(overlap, Polygon):
+        raw_coords.extend(list(overlap.exterior.coords)[:-1])
+
+    # Case B: Multiple separated overlapping areas (MultiPolygon)
+    elif isinstance(overlap, MultiPolygon):
+        for poly in overlap.geoms:
+            raw_coords.extend(list(poly.exterior.coords)[:-1])
+
+    # Case C: Lower-dimension contacts (LineString, Point, or Collections)
+    else:
+        # If it's a line touch or vertex point touch, extract coordinates directly
+        if hasattr(overlap, 'coords'):
+            raw_coords.extend(list(overlap.coords))
+        elif hasattr(overlap, 'geoms'):
+            for geom in overlap.geoms:
+                if hasattr(geom, 'coords'):
+                    raw_coords.extend(list(geom.coords))
+
+    # Remove any duplicate coordinate entries to keep the points unique
+    if len(raw_coords) > 0:
+        unique_pts = np.unique(np.array(raw_coords), axis=0)
+        return unique_pts
+        
+    return np.empty((0, 2))
 
 ## Main extraction check function
 def main_extraction_check(part_a, part_b,):
