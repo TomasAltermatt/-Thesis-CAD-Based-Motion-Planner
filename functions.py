@@ -248,6 +248,7 @@ def check_3D_AABB_intersection(part_a, part_b):
         return [None, None, False]
     return [(a_min_3d, a_max_3d), (b_min_3d, b_max_3d), True]
 
+
 ## Facet projection intersection test functions
 
 def check_static_interference(part_a, part_b):
@@ -309,7 +310,6 @@ def filter_facets(pf_a, pf_b, AABB_3d_intersection, tolerance = 1e-4):
                 candidates_b.append(local_idx)
 
     return candidates_a, candidates_b
-
 
 def hybrid_facet_intersection_test(part_a, part_b, facet_a, facet_b, MRT_tolerance = 1e-4):
     # 1. Check AABB of facets in 3D to discard impossible pairs instantly
@@ -379,9 +379,89 @@ def get_primitive_points(poly_a: Polygon, poly_b: Polygon):
     # Remove any duplicate coordinate entries to keep the points unique
     if len(raw_coords) > 0:
         unique_pts = np.unique(np.array(raw_coords), axis=0)
-        return unique_pts
+    
+    # Project these unique points onto the facet
         
     return np.empty((0, 2))
+
+def primitive_point_projection(pf, facet_idx, primitive_points):
+    # Solve equation of type A*u + B*v * C*w + D = 0 so we can extract w coordinate of
+    # primitive points projected on the facet plane
+
+    # Obtain pseudoface normals on each axis
+    nu = pf.part.face_normals[facet_idx][pf.u_axis]
+    nv = pf.part.face_normals[facet_idx][pf.v_axis]
+    nw = pf.part.face_normals[facet_idx][pf.extraction_axis]
+
+    # Get any point on the facet (e.g., the first vertex of the triangle)
+    u0 = pf.triangles_3d[facet_idx][0, pf.u_axis]
+    v0 = pf.triangles_3d[facet_idx][0, pf.v_axis]
+    w0 = pf.triangles_3d[facet_idx][0, pf.extraction_axis]
+
+    # Solve linear plane equation
+    D = -(nu * u0 + nv * v0 + nw * w0)
+    projected_w = -(nu * primitive_points[:, 0] + nv * primitive_points[:, 1] + D) / nw
+
+    # Return 3D coordinates of projected points
+    projected_points_3d = np.zeros((primitive_points.shape[0], 3))
+    projected_points_3d[:, pf.u_axis] = primitive_points[:, 0]
+    projected_points_3d[:, pf.v_axis] = primitive_points[:, 1]
+    projected_points_3d[:, pf.extraction_axis] = projected_w
+
+    return projected_points_3d
+
+def IM_entry_calculation(pf_a, facet_idx_a, pf_b, facet_idx_b, primitive_points_a, primitive_points_b,
+                         interference_type):
+    offset_tolerance = 1e-4
+
+    # Get 3d w bounds of the facets
+    w_bounds_a = pf_a.triangles_3d[facet_idx_a][:, pf_a.extraction_axis]
+    w_bounds_b = pf_b.triangles_3d[facet_idx_b][:, pf_b.extraction_axis]
+
+    w_max_a = max(w_bounds_a)
+    w_min_a = min(w_bounds_a)
+    w_max_b = max(w_bounds_b)
+    w_min_b = min(w_bounds_b)
+
+    # Get normal components in the extraction direction
+    normal_w_a = pf_a.part.face_normals[facet_idx_a][pf_a.extraction_axis]
+    normal_w_b = pf_b.part.face_normals[facet_idx_b][pf_b.extraction_axis]
+
+    entry_dict = {"minor": 1, "major": 2}
+    entry_val = entry_dict[interference_type]
+
+
+    # check if the primitive points of A are same as those of B
+    # pick any 2 vertexes of the facets and check if dot product of difference vector with the normal is 0
+    diff_vector = pf_a.triangles_3d[facet_idx_a][0] - pf_b.triangles_3d[facet_idx_b][0]
+    offset = np.dot(diff_vector, pf_a.part.face_normals[facet_idx_a])
+    # check if facets are flush and parallel (same normals and zero offset)
+    same_plane = abs(offset) < offset_tolerance and abs(np.dot(diff_vector, pf_b.part.face_normals[facet_idx_b])) < offset_tolerance
+
+
+    if w_max_a <= w_min_b and w_min_a != w_max_b:
+        return entry_val # A is fully on the negative extraction side of B, but they are not perfectly flush (which would be a static interference)
+
+    elif w_max_b <= w_min_a and w_max_a != w_min_b:
+        return entry_val # B is fully on the negative extraction side of A, but they are not perfectly flush (which would be a static interference)
+    
+    elif not same_plane:
+        for i in range(primitive_points_a.shape[0]):
+            w_prim_a = primitive_points_a[i][pf_a.extraction_axis]
+            w_prim_b = primitive_points_b[i][pf_b.extraction_axis]
+
+            if abs(w_prim_a - w_prim_b) < 1e-3:
+                continue 
+            elif w_prim_a < w_prim_b:
+                return entry_val # Primitive point of A is on the negative extraction side of B
+            else:                
+                return entry_val # Primitive point of B is on the negative extraction side of A
+            
+    else:
+        if (normal_w_a > 0 and normal_w_b > 0) or (normal_w_a < 0 and normal_w_b < 0):
+            return entry_val # They are parallel and facing the same direction, so we consider it a minor interference (1)
+        else:
+            return 4 # They interfere for extraction of both parts in the same direction
 
 ## Main extraction check function
 def main_extraction_check(part_a, part_b,):
