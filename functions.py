@@ -463,8 +463,11 @@ def IM_entry_calculation(pf_a, facet_idx_a, pf_b, facet_idx_b, primitive_points_
         else:
             return 4 # They interfere for extraction of both parts in the same direction
 
-## Main extraction check function
-def main_extraction_check(part_a, part_b,):
+## Main extractions
+
+def main_extraction_check(part_a, part_b, extraction_axis, IM_pos, IM_neg, entry_idx):
+    row, col = entry_idx
+
     # Get the solid bounding boxes
     bbox_a = part_a.bounding_box
     bbox_b = part_b.bounding_box
@@ -472,6 +475,40 @@ def main_extraction_check(part_a, part_b,):
     # Get Oriented bounding box with respect to part a
     to_origin_A, extents_A = trimesh.bounds.oriented_bounds(part_a)
     from_origin_A = np.linalg.inv(to_origin_A)
+    
+    # Create auxiliary copies (to avoid modifying the original meshes)
+    part_a_aux = part_a.copy()
+    part_b_aux = part_b.copy()
+
+    # Apply transformation to align part_a with the world axes (so its OBB becomes an AABB)
+    part_a_aux.apply_transform(to_origin_A)
+    part_b_aux.apply_transform(to_origin_A)
+
+    # Get the solid bounding boxes
+    bbox_a = part_a_aux.bounding_box
+    bbox_b = part_b_aux.bounding_box
+
+    # --- Broad phase check ---
+
+    #   1. COAABB and AABB check
+    overlap_region, overlap_result = check_2d_aabb_overlap(bbox_a.bounds, bbox_b.bounds, extraction_axis)
+    if overlap_result == 0:
+        return IM_pos, IM_neg
+    elif overlap_result == -1:
+        IM_neg[row, col] = 1
+        return IM_pos, IM_neg
+    elif overlap_result == 1:
+        IM_pos[row, col] = 1
+        return IM_pos, IM_neg
+    elif overlap_result == 2:
+        IM_pos[row, col] = 1
+        IM_neg[row, col] = 1
+        return IM_pos, IM_neg
+    
+    #   2. Pseudo Face check
+    
+
+    
 
 
     return
