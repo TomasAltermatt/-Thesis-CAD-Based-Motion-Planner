@@ -2,6 +2,8 @@ import trimesh
 import pyvista as pv
 import numpy as np
 import networkx as nx
+from itertools import Product
+from pathlib import Path
 from classes import PseudoFace
 from shapely.geometry import Polygon, MultiPolygon, GeometryCollection, LineString, Point
 
@@ -184,12 +186,12 @@ def check_PF_overlap(pf_a: PseudoFace, pf_b: PseudoFace, direction: str):
     return -2 # Undetermined, we need to check the focus facets in detail.
 
 def focus_facet_intersection_test(pf_a: PseudoFace, pf_b: PseudoFace, direction: str):
-    "Checks if any of the focus facets of PseudoFace of part A intersects with any of those of part B"
-    "Direction is either '+w' or '-w' depending on whether we are checking the positive or negative extraction direction"
-    "Returns:"
-    "   0 if no collision detected between any of the focus facets"
-    "   1 if A cannot be extracted in the positive direction without colliding with B, but can be extracted in the negative direction"
-    "  -1 if A cannot be extracted in the negative direction without colliding with B, but can be extracted in the positive direction"
+    """Checks if any of the focus facets of PseudoFace of part A intersects with any of those of part B.
+    Direction is either '+w' or '-w' depending on whether we are checking the positive or negative extraction direction
+    Returns:
+        0 if no collision detected between any of the focus facets.
+        1 if A cannot be extracted in the positive direction without colliding with B, but can be extracted in the negative direction.
+        -1 if A cannot be extracted in the negative direction without colliding with B, but can be extracted in the positive direction"""
     
     # First we test the AABBs of the candidates in 2D
     for facet_a in pf_a.focus_facets:
@@ -227,14 +229,32 @@ def focus_facet_intersection_test(pf_a: PseudoFace, pf_b: PseudoFace, direction:
                 return 2 # Collide instantly in both directions
             
             # Case b: I need to extract A in the positive direction, so I check if B is blocking that
-            if max_w_a <= min_w_b and direction == "+w":
+            elif max_w_a <= min_w_b and direction == "+w":
                 return 1 # A cannot be extracted in the positive direction without colliding with B
         
             # Case c: I need to extract A in the negative direction, so I check if B is blocking that
-            if min_w_a >= max_w_b and direction == "-w":
+            elif min_w_a >= max_w_b and direction == "-w":
                 return -1 # A cannot be extracted in the negative direction without colliding with B
             
     return 0 # No collision detected between any of the focus facets
+
+def focus_facet_intersection_full(pseudo_faces_a, pseudo_faces_b):
+    extraction_axis = pseudo_faces_a[0].extraction_axis
+    pos_result = 0
+    neg_result = 0
+    for pf_a in pseudo_faces_a:
+        for pf_b in pseudo_faces_b:
+                ff_intersection_pos = focus_facet_intersection_test(pf_a, pf_b, extraction_axis, "+w")
+                ff_intersection_neg = focus_facet_intersection_test(pf_a, pf_b, extraction_axis, "-w")
+
+                if ff_intersection_pos == 2 or ff_intersection_neg == 2:
+                    return 1, 1
+                else:
+                    if ff_intersection_pos == 1:
+                        pos_result = 1
+                    elif ff_intersection_neg == 1:
+                        neg_result = 1
+    return pos_result, neg_result
 
 
 ## Determine if parts intersect their AABBs
@@ -413,6 +433,8 @@ def primitive_point_projection(pf, facet_idx, primitive_points):
 def IM_entry_calculation(pf_a, facet_idx_a, pf_b, facet_idx_b, primitive_points_a, primitive_points_b,
                          interference_type):
     offset_tolerance = 1e-4
+    a_ij = 0
+    a_ji = 0
 
     # Get 3d w bounds of the facets
     w_bounds_a = pf_a.triangles_3d[facet_idx_a][:, pf_a.extraction_axis]
@@ -440,10 +462,10 @@ def IM_entry_calculation(pf_a, facet_idx_a, pf_b, facet_idx_b, primitive_points_
 
 
     if w_max_a <= w_min_b and w_min_a != w_max_b:
-        return entry_val # A is fully on the negative extraction side of B, but they are not perfectly flush (which would be a static interference)
+        a_ij = entry_val # A is fully on the negative extraction side of B, but they are not perfectly flush (which would be a static interference)
 
     elif w_max_b <= w_min_a and w_max_a != w_min_b:
-        return entry_val # B is fully on the negative extraction side of A, but they are not perfectly flush (which would be a static interference)
+        a_ji = entry_val # B is fully on the negative extraction side of A, but they are not perfectly flush (which would be a static interference)
     
     elif not same_plane:
         for i in range(primitive_points_a.shape[0]):
@@ -453,65 +475,149 @@ def IM_entry_calculation(pf_a, facet_idx_a, pf_b, facet_idx_b, primitive_points_
             if abs(w_prim_a - w_prim_b) < 1e-3:
                 continue 
             elif w_prim_a < w_prim_b:
-                return entry_val # Primitive point of A is on the negative extraction side of B
+                a_ij = entry_val # Primitive point of A is on the negative extraction side of B
             else:                
-                return entry_val # Primitive point of B is on the negative extraction side of A
+                a_ji = entry_val # Primitive point of B is on the negative extraction side of A
+            
+            # Check if both entries are != 0 so we stop checking further
+            if a_ij != 0 and a_ji != 0:
+                break
             
     else:
-        if (normal_w_a > 0 and normal_w_b > 0) or (normal_w_a < 0 and normal_w_b < 0):
-            return entry_val # They are parallel and facing the same direction, so we consider it a minor interference (1)
+        if (normal_w_a > 0 and normal_w_b > 0) :
+            a_ij = entry_val # They are parallel and facing the same direction, so we consider it a minor interference (1)
+        elif (normal_w_a < 0 and normal_w_b < 0):
+            a_ji = entry_val # They are parallel and facing the same direction, so we consider it a minor interference (1)
         else:
-            return 4 # They interfere for extraction of both parts in the same direction
+            a_ij = entry_val # They interfere for extraction of both parts in the same direction
+            a_ji = entry_val
+    
+    return a_ij, a_ji
+
 
 ## Main extractions
 
-def main_extraction_check(part_a, part_b, extraction_axis, IM_pos, IM_neg, entry_idx):
-    row, col = entry_idx
-
-    # Get the solid bounding boxes
-    bbox_a = part_a.bounding_box
-    bbox_b = part_b.bounding_box
-
-    # Get Oriented bounding box with respect to part a
-    to_origin_A, extents_A = trimesh.bounds.oriented_bounds(part_a)
-    from_origin_A = np.linalg.inv(to_origin_A)
+def load_assembly_from_folder(folder_path):
+    assembly_manifest = {}
+    matrix_idx = 0
     
-    # Create auxiliary copies (to avoid modifying the original meshes)
-    part_a_aux = part_a.copy()
-    part_b_aux = part_b.copy()
-
-    # Apply transformation to align part_a with the world axes (so its OBB becomes an AABB)
-    part_a_aux.apply_transform(to_origin_A)
-    part_b_aux.apply_transform(to_origin_A)
-
-    # Get the solid bounding boxes
-    bbox_a = part_a_aux.bounding_box
-    bbox_b = part_b_aux.bounding_box
-
-    # --- Broad phase check ---
-
-    #   1. COAABB and AABB check
-    overlap_region, overlap_result = check_2d_aabb_overlap(bbox_a.bounds, bbox_b.bounds, extraction_axis)
-    if overlap_result == 0:
-        return IM_pos, IM_neg
-    elif overlap_result == -1:
-        IM_neg[row, col] = 1
-        return IM_pos, IM_neg
-    elif overlap_result == 1:
-        IM_pos[row, col] = 1
-        return IM_pos, IM_neg
-    elif overlap_result == 2:
-        IM_pos[row, col] = 1
-        IM_neg[row, col] = 1
-        return IM_pos, IM_neg
+    # 1. Gather and sort all STL files in the directory alphabetical order
+    folder = Path(folder_path)
+    stl_files = sorted(list(folder.glob("*.stl")))
     
-    #   2. Pseudo Face check
-    
+    # 2. Iterate through the sorted files to build your dictionary
+    for file_path in stl_files:
+        part_name = file_path.stem  # Extracts just the name (e.g., "Bracket")
+        
+        # Load the mesh geometry
+        mesh_geom = trimesh.load(str(file_path))
+        
+        # Structure the inner data dictionary
+        assembly_manifest[part_name] = {
+            "matrix_idx": matrix_idx,
+            "part_mesh": mesh_geom
+        }
+        
+        # Move to the next index slot
+        matrix_idx += 1
+        
+    return assembly_manifest
 
-    
+
+def calculate_IM_matrices(assembly_manifest):
+    N = len(assembly_manifest)
+
+    matrices = {d: np.zeros((N, N), dtype=int) for d in ["+x", "-x", "+y", "-y", "+z", "-z"]}
+
+    axis_matrix_map = {"x": ["+x", "-x"], "y": ["+y", "-y"], "z": ["+z", "-z"]}
+
+    for extraction_axis in axis_matrix_map.keys():
+        for i in range(N):
+            for j in range(N):
+                pos_matrix_key = axis_matrix_map[extraction_axis][0]
+                neg_matrix_key = axis_matrix_map[extraction_axis][1]
+                # Flags to skip directional checks for this pair if a previous check already determined hard interference
+                pos_direction_done = False
+                neg_direction_done = False
+                if i == j:
+                    continue
+                part_a = assembly_manifest[list(assembly_manifest.keys())[i]]["part_mesh"]
+                part_b = assembly_manifest[list(assembly_manifest.keys())[j]]["part_mesh"]
+
+                # If entries are determined as hard interference in both directions for this pair we skip
+                IM_pos, IM_neg = matrices[axis_matrix_map[extraction_axis][0]], matrices[axis_matrix_map[extraction_axis][1]]
+                if IM_pos[i, j] == 2 and IM_neg[i, j] == 2:
+                    continue
+
+# -------------------------------- Start Main Loop ----------------------------------
+                # Get the solid bounding boxes
+                bbox_a = part_a.bounding_box
+                bbox_b = part_b.bounding_box
+
+                # Get Oriented bounding box with respect to part a
+                to_origin_A, extents_A = trimesh.bounds.oriented_bounds(part_a)
+                from_origin_A = np.linalg.inv(to_origin_A)
+                
+                # Create auxiliary copies (to avoid modifying the original meshes)
+                part_a_aux = part_a.copy()
+                part_b_aux = part_b.copy()
+
+                # Apply transformation to align part_a with the world axes (so its OBB becomes an AABB)
+                part_a_aux.apply_transform(to_origin_A)
+                part_b_aux.apply_transform(to_origin_A)
+
+                # Get the solid bounding boxes
+                bbox_a = part_a_aux.bounding_box
+                bbox_b = part_b_aux.bounding_box
 
 
-    return
+                # --- Broad phase check ---
+
+                #   1. COAABB and AABB check
+                overlap_region, overlap_result = check_2d_aabb_overlap(bbox_a.bounds, bbox_b.bounds, extraction_axis)
+                if overlap_result == 0:
+                    continue
+                elif overlap_result == -1:
+                    matrices[neg_matrix_key][i, j] = 2
+                    continue
+                elif overlap_result == 1:
+                    matrices[pos_matrix_key][i, j] = 2
+                    continue
+                elif overlap_result == 2:
+                    matrices[pos_matrix_key][i, j] = 2
+                    matrices[neg_matrix_key][i, j] = 2
+                    continue
+
+                #   2. Pseudo Face check
+                pseudo_faces_a = create_PFs(part_a_aux, extraction_axis)
+                pseudo_faces_b = create_PFs(part_b_aux, extraction_axis)
+
+                for pf_a in pseudo_faces_a:
+                    pf_a.get_focus_facets(overlap_region)
+                for pf_b in pseudo_faces_b:
+                    pf_b.get_focus_facets(overlap_region)
+
+                # loop over pseudofaces in A and B for focus facet intersection
+                pos_ff_intersect, neg_ff_intersect = focus_facet_intersection_full(pseudo_faces_a, pseudo_faces_b)
+                if pos_ff_intersect:
+                    pos_direction_done = 1
+                    matrices[pos_matrix_key][i,j] = 2
+                if neg_ff_intersect:
+                    neg_direction_done = 1
+                    matrices[neg_matrix_key][i,j] = 2
+                    
+
+
+
+                
+                
+                
+
+                
+
+
+
+
 
 ## Auxiliary visualization Functions with pyvista
 def visualize_pseudofaces(part, pseudo_faces_list):
