@@ -132,7 +132,8 @@ def create_PFs(part: trimesh.Trimesh, extraction_axis: str, tolerance = 1e-4):
 
     return [PseudoFace(part, c, extraction_axis) for c in list(nx.connected_components(G))]
 
-def check_PF_overlap(pf_a: PseudoFace, pf_b: PseudoFace, direction: str):
+def check_PF_overlap(pf_a: PseudoFace, pf_b: PseudoFace):
+    result = [-2, -2]
     # Dynamic axis selection using the class attribute
     axis_idx = {"x": 0, "y": 1, "z": 2}
     w_idx = axis_idx[pf_a.extraction_axis]
@@ -160,7 +161,7 @@ def check_PF_overlap(pf_a: PseudoFace, pf_b: PseudoFace, direction: str):
 
     # Filter 2: Check if the 2D bounding boxes of the pseudo-faces overlap
     if not ((overlap_min_u <= overlap_max_u) and (overlap_min_v <= overlap_max_v)):
-        return 0 # No overlap in 2D, they cannot collide.
+        return [0, 0] # No overlap in 2D, they cannot collide.
     
     # Check COAABB overlap
     a_lims = [(a_min_u, a_max_u), (a_min_v, a_max_v)]
@@ -169,21 +170,21 @@ def check_PF_overlap(pf_a: PseudoFace, pf_b: PseudoFace, direction: str):
 
     if not coaabb_overlap:
         # AABBs overlap roughly, but the tighter COAABBs missed each other. Safe.
-        return 0 
+        return [0, 0] 
     
     # Static Overlap Check: If they are clashing right now, it blocks both directions!
     if a_max_w >= b_min_w and a_min_w <= b_max_w:
-        return 2  # Hard static collision! Blocked.
+        return [1, 1]  # Hard static collision! Blocked.
 
     # Directional macro-blocking check
-    if a_min_w >= b_max_w and direction == "-w":
-        return -1 # Blocked in negative direction
-    elif b_min_w >= a_max_w and direction == "+w":
-        return 1  # Blocked in positive direction
+    if a_min_w >= b_max_w :
+        result[1] = 1 # Blocked in negative direction
+    if b_min_w >= a_max_w:
+        result[0] = 1  # Blocked in positive direction
 
-    # If it hasn't returned yet, it means the macro shapes overlap in 2D, but their 
-    # depths are inconclusive (undetermined). We MUST run the individual facet tests.
-    return -2 # Undetermined, we need to check the focus facets in detail.
+    # Return the result of the checks
+    return result # If it hasn't returned yet, it means the macro shapes overlap in 2D, but their 
+                  # depths are inconclusive (we need to run the facet intersection tests)
 
 def focus_facet_intersection_test(pf_a: PseudoFace, pf_b: PseudoFace, direction: str):
     """Checks if any of the focus facets of PseudoFace of part A intersects with any of those of part B.
@@ -280,7 +281,7 @@ def check_static_interference(part_a, part_b):
     is_colliding = collision_manager.in_collision_internal()
     return is_colliding
 
-def filter_facets(pf_a, pf_b, AABB_3d_intersection, tolerance = 1e-4):
+def filter_facets(pf_a: PseudoFace, pf_b: PseudoFace, AABB_3d_intersection, tolerance = 1e-4):
     w_idx = pf_a.extraction_axis # Same for both pf_a or pf_b
     a_min_3d, a_max_3d = AABB_3d_intersection[0]
     b_min_3d, b_max_3d = AABB_3d_intersection[1]
@@ -331,7 +332,7 @@ def filter_facets(pf_a, pf_b, AABB_3d_intersection, tolerance = 1e-4):
 
     return candidates_a, candidates_b
 
-def hybrid_facet_intersection_test(part_a, part_b, facet_a, facet_b, MRT_tolerance = 1e-4):
+def hybrid_facet_intersection_test(part_a, part_b, facet_a, facet_b, use_MRT, MRT_tolerance = 1e-4):
     # 1. Check AABB of facets in 3D to discard impossible pairs instantly
     a_min = facet_a.min(axis=0)
     a_max = facet_a.max(axis=0)
@@ -347,9 +348,6 @@ def hybrid_facet_intersection_test(part_a, part_b, facet_a, facet_b, MRT_toleran
     poly_a = Polygon(facet_a[:, :2]) # Project to 2D (U and V)
     poly_b = Polygon(facet_b[:, :2]) # Project to 2D (U and V)
     
-    # 2. Check if there is static interference between the 2 parts
-    use_MRT = check_static_interference(part_a, part_b)
-
     # 3. Case 1: If there is static interference we use MRT
     if use_MRT:
         overlap_poly = poly_a.intersection(poly_b)
@@ -450,7 +448,7 @@ def IM_entry_calculation(pf_a, facet_idx_a, pf_b, facet_idx_b, primitive_points_
     normal_w_b = pf_b.part.face_normals[facet_idx_b][pf_b.extraction_axis]
 
     entry_dict = {"minor": 1, "major": 2}
-    entry_val = entry_dict[interference_type]
+    entry_val = interference_type
 
 
     # check if the primitive points of A are same as those of B
@@ -536,13 +534,14 @@ def calculate_IM_matrices(assembly_manifest):
             for j in range(N):
                 pos_matrix_key = axis_matrix_map[extraction_axis][0]
                 neg_matrix_key = axis_matrix_map[extraction_axis][1]
-                # Flags to skip directional checks for this pair if a previous check already determined hard interference
-                pos_direction_done = False
-                neg_direction_done = False
+
                 if i == j:
                     continue
                 part_a = assembly_manifest[list(assembly_manifest.keys())[i]]["part_mesh"]
                 part_b = assembly_manifest[list(assembly_manifest.keys())[j]]["part_mesh"]
+
+                use_MRT = check_static_interference(part_a, part_b)
+                parts_AABB_interfere = check_3D_AABB_intersection(part_a, part_b)
 
                 # If entries are determined as hard interference in both directions for this pair we skip
                 IM_pos, IM_neg = matrices[axis_matrix_map[extraction_axis][0]], matrices[axis_matrix_map[extraction_axis][1]]
@@ -597,27 +596,41 @@ def calculate_IM_matrices(assembly_manifest):
                 for pf_b in pseudo_faces_b:
                     pf_b.get_focus_facets(overlap_region)
 
-                # loop over pseudofaces in A and B for focus facet intersection
+                # Loop over pseudofaces in A and B for focus facet intersection
                 pos_ff_intersect, neg_ff_intersect = focus_facet_intersection_full(pseudo_faces_a, pseudo_faces_b)
                 if pos_ff_intersect:
-                    pos_direction_done = 1
                     matrices[pos_matrix_key][i,j] = 2
                 if neg_ff_intersect:
-                    neg_direction_done = 1
                     matrices[neg_matrix_key][i,j] = 2
                     
+                if pos_ff_intersect and neg_ff_intersect:
+                    continue
 
+                # If no result then check complete pseudoface interference
+                for pf_a in pseudo_faces_a:
+                    for pf_b in pseudo_faces_b:
+                        pf_intersect = check_PF_overlap(pf_a, pf_b)
 
+                        # If for either side it's inconclusive then we check facet intersection individually
+                        if -2 in pf_intersect:
+                            candidates_a, candidates_b = filter_facets(pf_a, pf_b, parts_AABB_interfere)
+                            for idx_a in candidates_a:
+                                no_intersect = 0
+                                facet_a = pf_a.triangles_3d[idx_a]
+                                for idx_b in candidates_b:
+                                    facet_b = pf_a.triangles_3d[idx_b]
+                                    hybrid_result = hybrid_facet_intersection_test(part_a_aux, part_b_aux)
 
+                                    if hybrid_result not in [1, 2]:
+                                        no_intersect = 1
+                                        continue
+
+                                    primitive_all = get_primitive_points(facet_a, facet_b)
+                                    primitive_points_a = primitive_point_projection(pf_a, idx_a, primitive_all)
+                                    primitive_points_b = primitive_point_projection(pf_b, idx_b, primitive_all)
+                                    entries = IM_entry_calculation(pf_a, idx_a, pf_b, idx_b, primitive_points_a, 
+                                                                   primitive_points_b, hybrid_result)
                 
-                
-                
-
-                
-
-
-
-
 
 ## Auxiliary visualization Functions with pyvista
 def visualize_pseudofaces(part, pseudo_faces_list):
