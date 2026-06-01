@@ -2,7 +2,8 @@ import trimesh
 import pyvista as pv
 import numpy as np
 import networkx as nx
-from itertools import Product
+import os
+import pandas as pd
 from pathlib import Path
 from classes import PseudoFace
 from shapely.geometry import Polygon, MultiPolygon, GeometryCollection, LineString, Point
@@ -135,8 +136,7 @@ def create_PFs(part: trimesh.Trimesh, extraction_axis: str, tolerance = 1e-4):
 def check_PF_overlap(pf_a: PseudoFace, pf_b: PseudoFace):
     result = [-2, -2]
     # Dynamic axis selection using the class attribute
-    axis_idx = {"x": 0, "y": 1, "z": 2}
-    w_idx = axis_idx[pf_a.extraction_axis]
+    w_idx = pf_a.extraction_axis
 
     # Pseudoface A bounding box 2D limits and dynamic depth limits
     a_min_u, a_min_v = pf_a.triangles_2d.min(axis=(0,1))
@@ -174,13 +174,13 @@ def check_PF_overlap(pf_a: PseudoFace, pf_b: PseudoFace):
     
     # Static Overlap Check: If they are clashing right now, it blocks both directions!
     if a_max_w >= b_min_w and a_min_w <= b_max_w:
-        return [1, 1]  # Hard static collision! Blocked.
+        return [2, 2]  # Hard static collision! Blocked.
 
     # Directional macro-blocking check
     if a_min_w >= b_max_w :
-        result[1] = 1 # Blocked in negative direction
+        result[1] = 2 # Blocked in negative direction
     if b_min_w >= a_max_w:
-        result[0] = 1  # Blocked in positive direction
+        result[0] = 2  # Blocked in positive direction
 
     # Return the result of the checks
     return result # If it hasn't returned yet, it means the macro shapes overlap in 2D, but their 
@@ -245,8 +245,8 @@ def focus_facet_intersection_full(pseudo_faces_a, pseudo_faces_b):
     neg_result = 0
     for pf_a in pseudo_faces_a:
         for pf_b in pseudo_faces_b:
-                ff_intersection_pos = focus_facet_intersection_test(pf_a, pf_b, extraction_axis, "+w")
-                ff_intersection_neg = focus_facet_intersection_test(pf_a, pf_b, extraction_axis, "-w")
+                ff_intersection_pos = focus_facet_intersection_test(pf_a, pf_b, "+w")
+                ff_intersection_neg = focus_facet_intersection_test(pf_a, pf_b, "-w")
 
                 if ff_intersection_pos == 2 or ff_intersection_neg == 2:
                     return 1, 1
@@ -505,10 +505,18 @@ def load_assembly_from_folder(folder_path):
     
     # 2. Iterate through the sorted files to build your dictionary
     for file_path in stl_files:
-        part_name = file_path.stem  # Extracts just the name (e.g., "Bracket")
+        raw_name = file_path.stem  # e.g., "Ensamblaje1 - Lid-1"
+        
+        # Split the string at the hyphen and keep only the last part
+        if " - " in raw_name:
+            part_name = raw_name.split(" - ")[-1].strip() # Becomes "Lid-1"
+        else:
+            part_name = raw_name
         
         # Load the mesh geometry
         mesh_geom = trimesh.load(str(file_path))
+
+        mesh_geom.merge_vertices()
         
         # Structure the inner data dictionary
         assembly_manifest[part_name] = {
@@ -530,11 +538,13 @@ def calculate_IM_matrices(assembly_manifest):
     axis_matrix_map = {"x": ["+x", "-x"], "y": ["+y", "-y"], "z": ["+z", "-z"]}
 
     for extraction_axis in axis_matrix_map.keys():
+        pos_matrix_key = axis_matrix_map[extraction_axis][0]
+        neg_matrix_key = axis_matrix_map[extraction_axis][1]
+        
         for i in range(N):
+            print(f'\n----------------- Checking {extraction_axis} Direction, MOVES: Part {i}')
             for j in range(N):
-                pos_matrix_key = axis_matrix_map[extraction_axis][0]
-                neg_matrix_key = axis_matrix_map[extraction_axis][1]
-
+                
                 if i == j:
                     continue
                 part_a = assembly_manifest[list(assembly_manifest.keys())[i]]["part_mesh"]
@@ -549,10 +559,6 @@ def calculate_IM_matrices(assembly_manifest):
                     continue
 
 # -------------------------------- Start Main Loop ----------------------------------
-                # Get the solid bounding boxes
-                bbox_a = part_a.bounding_box
-                bbox_b = part_b.bounding_box
-
                 # Get Oriented bounding box with respect to part a
                 to_origin_A, extents_A = trimesh.bounds.oriented_bounds(part_a)
                 from_origin_A = np.linalg.inv(to_origin_A)
@@ -573,7 +579,10 @@ def calculate_IM_matrices(assembly_manifest):
                 # --- Broad phase check ---
 
                 #   1. COAABB and AABB check
+                print(f'1. Checking AABB/COAABB for {i} and {j}')
                 overlap_region, overlap_result = check_2d_aabb_overlap(bbox_a.bounds, bbox_b.bounds, extraction_axis)
+                if overlap_result != -2:
+                    print(f'Parts {i} and {j} intersect their AABBs')
                 if overlap_result == 0:
                     continue
                 elif overlap_result == -1:
@@ -587,7 +596,9 @@ def calculate_IM_matrices(assembly_manifest):
                     matrices[neg_matrix_key][i, j] = 2
                     continue
 
+
                 #   2. Pseudo Face check
+                print(f'2. Checking PseudoFaces for {i} and {j}')
                 pseudo_faces_a = create_PFs(part_a_aux, extraction_axis)
                 pseudo_faces_b = create_PFs(part_b_aux, extraction_axis)
 
@@ -597,40 +608,133 @@ def calculate_IM_matrices(assembly_manifest):
                     pf_b.get_focus_facets(overlap_region)
 
                 # Loop over pseudofaces in A and B for focus facet intersection
+                print(f'\ta) Focus Facet Test')
                 pos_ff_intersect, neg_ff_intersect = focus_facet_intersection_full(pseudo_faces_a, pseudo_faces_b)
-                if pos_ff_intersect:
+                if pos_ff_intersect and neg_ff_intersect:
+                    print(f'\t\tFocus Facets intersect(+ AND -)')
+                    continue
+                elif pos_ff_intersect:
                     matrices[pos_matrix_key][i,j] = 2
-                if neg_ff_intersect:
+                    print(f'\t\tFocus Facets intersect (+)')
+                elif neg_ff_intersect:
+                    print(f'\t\tFocus Facets intersect(-)')
                     matrices[neg_matrix_key][i,j] = 2
                     
-                if pos_ff_intersect and neg_ff_intersect:
-                    continue
+                
 
                 # If no result then check complete pseudoface interference
+                print(f'\tb) Full PseudoFace Interference Test')
+                full_interference = 0
                 for pf_a in pseudo_faces_a:
-                    for pf_b in pseudo_faces_b:
-                        pf_intersect = check_PF_overlap(pf_a, pf_b)
+                    if full_interference:
+                        break
 
-                        # If for either side it's inconclusive then we check facet intersection individually
+                    for pf_b in pseudo_faces_b:
+                        if full_interference:
+                            break
+                        pf_intersect = check_PF_overlap(pf_a, pf_b)
+                        if -2 not in pf_intersect:
+                            print(f'\t\tFull PseudoFace interference detected before Triangle checks')
+                        
+                        # 1. Initialize our final known entries using the macro baseline
+                        final_pos, final_neg = pf_intersect
+                        print(f'\t\t\tBefore narrow triangle checks: [{final_pos}, {final_neg}]')
+
+                        # 2. If it's inconclusive, run the triangles to upgrade the final variables
+                        
                         if -2 in pf_intersect:
                             candidates_a, candidates_b = filter_facets(pf_a, pf_b, parts_AABB_interfere)
                             for idx_a in candidates_a:
-                                no_intersect = 0
+                                if full_interference:
+                                    break
                                 facet_a = pf_a.triangles_3d[idx_a]
+                                
                                 for idx_b in candidates_b:
-                                    facet_b = pf_a.triangles_3d[idx_b]
-                                    hybrid_result = hybrid_facet_intersection_test(part_a_aux, part_b_aux)
+                                    facet_b = pf_b.triangles_3d[idx_b]
+                                    hybrid_result = hybrid_facet_intersection_test(part_a_aux, part_b_aux, facet_a, facet_b, use_MRT)
 
                                     if hybrid_result not in [1, 2]:
-                                        no_intersect = 1
                                         continue
 
                                     primitive_all = get_primitive_points(facet_a, facet_b)
                                     primitive_points_a = primitive_point_projection(pf_a, idx_a, primitive_all)
                                     primitive_points_b = primitive_point_projection(pf_b, idx_b, primitive_all)
-                                    entries = IM_entry_calculation(pf_a, idx_a, pf_b, idx_b, primitive_points_a, 
-                                                                   primitive_points_b, hybrid_result)
-                
+                                    
+                                    positive_entry, negative_entry = IM_entry_calculation(
+                                        pf_a, idx_a, pf_b, idx_b, primitive_points_a, primitive_points_b, hybrid_result
+                                    )
+                                
+
+                                    # Upgrade the local pair variables if the triangles found a harder crash
+                                    final_pos = max(final_pos, positive_entry)
+                                    final_neg = max(final_neg, negative_entry)
+
+                                    if final_pos == 2 and final_neg == 2:
+                                        break # Inner triangle break
+                        print(f'\t\t\tTriangle interference results: [{final_pos}, {final_neg}]')
+                        # 3. Always write the absolute maximum known value to the global matrices!
+                        # (This runs whether we skipped the triangles or not)
+                        matrices[pos_matrix_key][i, j] = max(matrices[pos_matrix_key][i, j], final_pos)
+                        matrices[neg_matrix_key][i, j] = max(matrices[neg_matrix_key][i, j], final_neg)
+
+                        # 4. Global short-circuit: Stop checking PFs if the matrix is completely blocked
+                        if matrices[pos_matrix_key][i, j] == 2 and matrices[neg_matrix_key][i, j] == 2:
+                            full_interference = 1
+                            break
+    return matrices
+
+def export_matrices_to_excel(matrices, assembly_manifest, output_folder="output_matrices", filename="Interference_Matrices.xlsx"):
+    """
+    Exports the 6 directional matrices to a single Excel file, 
+    putting each matrix on its own named tab.
+    """
+    # Create the output folder if it doesn't exist
+    os.makedirs(output_folder, exist_ok=True)
+    filepath = os.path.join(output_folder, filename)
+    
+    # Extract part names sorted by their matrix_idx to guarantee exact alignment
+    sorted_parts = sorted(assembly_manifest.items(), key=lambda x: x[1]["matrix_idx"])
+    part_names = [name for name, data in sorted_parts]
+
+    # Open the Excel writer engine
+    with pd.ExcelWriter(filepath, engine='openpyxl') as writer:
+        for direction, matrix in matrices.items():
+            
+            # Create the DataFrame
+            df = pd.DataFrame(matrix, index=part_names, columns=part_names)
+            df.index.name = "Moving \ Stationary"
+            
+            # Create a clean tab name (e.g., "+x" becomes "Pos_X")
+            tab_name = direction.replace("+", "Pos_").replace("-", "Neg_").upper()
+            
+            # Write this specific matrix to its own tab
+            df.to_excel(writer, sheet_name=tab_name)
+            
+    print(f"Successfully saved all matrices to a single Excel file: {filepath}")
+
+
+def export_matrices_to_csv(matrices, assembly_manifest, output_folder="output_matrices"):
+    """
+    Exports the 6 directional matrices to CSV files with part names as headers.
+    """
+    # Create the output folder if it doesn't exist
+    os.makedirs(output_folder, exist_ok=True)
+    
+    # Extract part names sorted by their matrix_idx to guarantee exact alignment
+    sorted_parts = sorted(assembly_manifest.items(), key=lambda x: x[1]["matrix_idx"])
+    part_names = [name for name, data in sorted_parts]
+
+    # Export each direction as its own spreadsheet
+    for direction, matrix in matrices.items():
+        # Create a Pandas DataFrame to bind the matrix to the part names
+        df = pd.DataFrame(matrix, index=part_names, columns=part_names)
+        
+        # Save it cleanly to disk
+        safe_dir_name = direction.replace("+", "Pos_").replace("-", "Neg_")
+        filepath = os.path.join(output_folder, f"IM_Matrix_{safe_dir_name}.csv")
+        
+        df.to_csv(filepath)
+        print(f"Successfully saved {direction} matrix to: {filepath}")             
 
 ## Auxiliary visualization Functions with pyvista
 def visualize_pseudofaces(part, pseudo_faces_list):
@@ -685,34 +789,38 @@ def visualize_extraction_directions(part_a, part_b, local_x_dir = [1, 0, 0], loc
     # Show the interactive window
     plotter.show()
 
-def visualize_narrow_phase(pseudo_faces, overlap_region):
-    plotter = pv.Plotter()
+def visualize_narrow_phase(pseudo_faces, overlap_region, plotter, index, show = False):
+    
     for i, pf in enumerate(pseudo_faces):
         if i == 0:
-            pf.visualize_focus_facets(overlap_region, plotter)
+            pf.visualize_focus_facets(overlap_region, plotter, index)
         else:
-            pf.visualize_focus_facets(overlap_region, plotter, show_SR_box=False)
-    plotter.show()
+            pf.visualize_focus_facets(overlap_region, plotter, index, show_SR_box=False)
+    if show:
+        plotter.show()
 # ----------------------------------------------------- COMPLEMENTARY FUNCTIONS ---------------------------------------------- 
 
 # For the loop i need to revert the transformation applied to part_b so i
 # can get extraction directions in the original frame
 if __name__ == "__main__":
 
-    # Load models using trimesh
-    part_a = trimesh.load('STLs/Ensamblaje1 - Lid-1.STL')
-    part_b = trimesh.load('STLs/Ensamblaje1 - Pen-1.STL')
+    assembly_manifest = load_assembly_from_folder('STLs')
+
+    final_matrices = calculate_IM_matrices(assembly_manifest)
+    export_matrices_to_excel(final_matrices, assembly_manifest)
+
+    for key, matrix in final_matrices.items():
+        print(f'IM for {key}:\n {matrix}')
+
+
+    # Now we need to visualize the extraction directions to verify
+    part_a = assembly_manifest[list(assembly_manifest.keys())[0]]["part_mesh"]
+    part_b = assembly_manifest[list(assembly_manifest.keys())[1]]["part_mesh"]
 
     # Get Oriented bounding box with respect to part a
     to_origin_A, extents_A = trimesh.bounds.oriented_bounds(part_a)
     from_origin_A = np.linalg.inv(to_origin_A)
-
-    # Get directions of the OBB axes for part_a
-    local_x_dir = from_origin_A[:3, 0]
-    local_y_dir = from_origin_A[:3, 1]
-    local_z_dir = from_origin_A[:3, 2]
-    center_point = from_origin_A[:3, 3]
-
+                
     # Create auxiliary copies (to avoid modifying the original meshes)
     part_a_aux = part_a.copy()
     part_b_aux = part_b.copy()
@@ -725,26 +833,19 @@ if __name__ == "__main__":
     bbox_a = part_a_aux.bounding_box
     bbox_b = part_b_aux.bounding_box
 
+    #visualize_extraction_directions(part_a_aux, part_b_aux)
 
+    overlap_region, overlap_result = check_2d_aabb_overlap(bbox_a.bounds, bbox_b.bounds, 'z')
+    pfs_a = create_PFs(part_a_aux, 'z')
+    for pf in pfs_a:
+        pf.get_focus_facets(overlap_region)
+    pfs_b = create_PFs(part_b_aux, 'z')
+    for pf in pfs_b:
+        pf.get_focus_facets(overlap_region)
 
-    # # --- Let's test it on your data! ---
-    # visualize_extraction_directions(part_a_aux, part_b_aux)
-    # axis_test = input("Enter the extraction axis (x, y, or z): ").lower()
-
-    # # 1. Check AABB and COAABB overlap
-    # overlap_region, overlap_result = check_2d_aabb_overlap(bbox_a.bounds, bbox_b.bounds, extraction_axis=axis_test)
-
-    # # Test Pseudo Face creation and visualization
-    # pseudo_faces_a = create_PFs(part_a_aux, extraction_axis=axis_test)
-    # pseudo_faces_b = create_PFs(part_b_aux, extraction_axis=axis_test)
-
-    # for pf in pseudo_faces_a:
-    #     pf.get_focus_facets(overlap_region)
-    # for pf in pseudo_faces_b:
-    #     pf.get_focus_facets(overlap_region)
-
-    # visualize_narrow_phase(pseudo_faces_a, overlap_region)
-    # visualize_narrow_phase(pseudo_faces_b, overlap_region)
+    plotter = pv.Plotter()
+    #visualize_narrow_phase(pfs_a, overlap_region, plotter, 0, show = True)
+    visualize_narrow_phase(pfs_b, overlap_region, plotter, 1, show = True)
 
 
 

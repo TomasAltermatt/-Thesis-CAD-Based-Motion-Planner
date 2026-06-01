@@ -6,6 +6,7 @@ import trimesh
 
 class PseudoFace:
     def __init__(self, part: trimesh.Trimesh, face_indices: list, extraction_axis: str):
+        axis_idx = {"x": 0, "y": 1, "z": 2}
         self.part = part
         self.face_indices = np.array(list(face_indices), dtype=int)
         self.extraction_axis = axis_idx[extraction_axis]
@@ -14,7 +15,6 @@ class PseudoFace:
 
         self.triangles_3d = part.triangles[self.face_indices]
 
-        axis_idx = {"x": 0, "y": 1, "z": 2}
         all_axes = [0, 1, 2]
         all_axes.remove(axis_idx[extraction_axis])
         self.u_axis, self.v_axis = all_axes[0], all_axes[1]
@@ -59,14 +59,14 @@ class PseudoFace:
         # print(f"Focus facets indices: {self.focus_facets}")
     
 
-    def visualize_focus_facets(self, SR, plotter, show_SR_box=True, show = False):
+    def visualize_focus_facets(self, SR, plotter, index, show_SR_box=True, show = False):
         """
         Visualizes the full part, the PseudoFace, the Focus Facets,
         the 3D Shadow Region bounding volume, and the 5 specific probe points.
         """
         # 1. Map the string extraction axis to world coordinates dynamically
         axis_idx = {"x": 0, "y": 1, "z": 2}
-        w_idx = axis_idx[self.extraction_axis]
+        w_idx = self.extraction_axis
         all_axes = [0, 1, 2]
         all_axes.remove(w_idx)
         u_idx = all_axes[0]
@@ -136,7 +136,8 @@ class PseudoFace:
         global_focus_indices = self.face_indices[self.focus_facets]
         if len(global_focus_indices) > 0:
             focus_mesh = mesh.extract_cells(global_focus_indices)
-            plotter.add_mesh(focus_mesh, color="gold", show_edges=True, edge_color="black", line_width=2, label="Focus Facets")
+            col = 'gold' if index == 0 else 'crimson'
+            plotter.add_mesh(focus_mesh, color=col, show_edges=True, edge_color="black", line_width=2, label="Focus Facets")
         
         if show:
             plotter.show()

@@ -1,6 +1,7 @@
 # Assemblies, Parts and STL files
 STLs/
 Parts and Assemblies/
+output_matrices/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
