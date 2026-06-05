@@ -540,13 +540,17 @@ def evaluate_narrow_phase(candidates_a, candidates_b, pf_a, pf_b, part_a_aux, pa
 
 
 ## Main Extraction functions
-def evaluate_pair_interference(part_a, part_b, extraction_axis):
+def evaluate_pair_interference(part_a_data, part_b_data, extraction_axis):
     """Evaluates the maximum interference between two parts along a specific axis."""
+    # Unpack the pre-calculated data!
+    part_a = part_a_data["part_mesh"]
+    part_b = part_b_data["part_mesh"]
+    to_origin_A = part_a_data["to_origin"]
+    
     use_MRT = check_static_interference(part_a, part_b)
     parts_AABB_interfere = check_3D_AABB_intersection(part_a, part_b)
     
-    # 1. Transformation and Broad Phase
-    to_origin_A, _ = trimesh.bounds.oriented_bounds(part_a)
+    # 1. Transformation and Broad Phase (Using the cached matrix!)
     part_a_aux, part_b_aux = part_a.copy(), part_b.copy()
     part_a_aux.apply_transform(to_origin_A)
     part_b_aux.apply_transform(to_origin_A)
@@ -611,16 +615,15 @@ def calculate_IM_matrices(assembly_manifest):
     for extraction_axis, (pos_key, neg_key) in axis_matrix_map.items():
         print(f'\n----------------- Checking {extraction_axis} Direction -----------------')
         
-        # permutations handles the i and j loops instantly!
         for i, j in permutations(range(N), 2):
-            print(f'Evaluating interference between "{part_keys[i]}" and "{part_keys[j]}" along {extraction_axis} axis...')
-            part_a = assembly_manifest[part_keys[i]]["part_mesh"]
-            part_b = assembly_manifest[part_keys[j]]["part_mesh"]
-
-            # Ask the helper function to do the heavy lifting
-            pos_val, neg_val = evaluate_pair_interference(part_a, part_b, extraction_axis)
             
-            # Write the results to the matrix
+            # ---> Grab the whole dictionary for the part, not just the mesh! <---
+            part_a_data = assembly_manifest[part_keys[i]]
+            part_b_data = assembly_manifest[part_keys[j]]
+
+            # Pass the dictionaries to the helper function
+            pos_val, neg_val = evaluate_pair_interference(part_a_data, part_b_data, extraction_axis)
+            
             matrices[pos_key][i, j] = pos_val
             matrices[neg_key][i, j] = neg_val
 
@@ -650,10 +653,28 @@ def load_assembly_from_folder(folder_path):
 
         mesh_geom.merge_vertices()
         
+        # Get the Oriented Bounding Box transformation matrix
+        to_origin, extents = trimesh.bounds.oriented_bounds(mesh_geom)
+        from_origin = np.linalg.inv(to_origin)
+        
+        # Extract the 3D vectors for the 6 directions (columns of the rotation matrix)
+        # These are the exact 3D vectors the robot needs to pull the part!
+        extraction_vectors = {
+            "+x": from_origin[:3, 0],
+            "-x": -from_origin[:3, 0],
+            "+y": from_origin[:3, 1],
+            "-y": -from_origin[:3, 1],
+            "+z": from_origin[:3, 2],
+            "-z": -from_origin[:3, 2]
+        }
+
         # Structure the inner data dictionary
         assembly_manifest[part_name] = {
             "matrix_idx": matrix_idx,
-            "part_mesh": mesh_geom
+            "part_mesh": mesh_geom,
+            "to_origin": to_origin,              # Store this to speed up the main loop!
+            "extraction_vectors": extraction_vectors,
+            "center_point": from_origin[:3, 3]   # The exact center of the OBB
         }
         
         # Move to the next index slot
@@ -713,6 +734,32 @@ def export_matrices_to_csv(matrices, assembly_manifest, output_folder="output_ma
         df.to_csv(filepath)
         print(f"Successfully saved {direction} matrix to: {filepath}")             
 
+def export_directions_to_excel(assembly_manifest, output_folder="output_matrices", filename="Robot_Extraction_Vectors.xlsx"):
+    """
+    Exports the 3D extraction vectors for each part to an Excel sheet.
+    """
+    os.makedirs(output_folder, exist_ok=True)
+    filepath = os.path.join(output_folder, filename)
+    
+    # Prepare the data dictionary for Pandas
+    data = {"Part Name": []}
+    directions = ["+x", "-x", "+y", "-y", "+z", "-z"]
+    for d in directions:
+        data[d] = []
+        
+    for part_name, properties in assembly_manifest.items():
+        data["Part Name"].append(part_name)
+        for d in directions:
+            # Format the vector as a clean, rounded string: "[1.000, 0.000, 0.000]"
+            v = properties["extraction_vectors"][d]
+            data[d].append(f"[{v[0]:.3f}, {v[1]:.3f}, {v[2]:.3f}]")
+            
+    # Export to Excel
+    df = pd.DataFrame(data)
+    df.set_index("Part Name", inplace=True)
+    df.to_excel(filepath)
+    print(f"Successfully saved Robot Extraction Vectors to: {filepath}")
+
 ## Auxiliary visualization Functions with pyvista
 def visualize_pseudofaces(part, pseudo_faces_list):
     """
@@ -746,24 +793,34 @@ def visualize_pseudofaces(part, pseudo_faces_list):
     # Show the interactive window!
     pl.show()
 
-def visualize_extraction_directions(part_a, part_b, local_x_dir = [1, 0, 0], local_y_dir = [0, 1, 0], local_z_dir = [0, 0, 1], center_point = [0, 0, 0]):
-    plotter = pv.Plotter()
-    plotter.add_mesh(pv.wrap(part_a), color="lightgray", opacity=0.8)
-    plotter.add_mesh(pv.wrap(part_b), color="lightblue", opacity=0.8)
+def visualize_part_axes(part_name, assembly_manifest):
+    """
+    Visualizes a specific part in its original global position 
+    and draws its extraction axes based on its OBB.
+    """
+    properties = assembly_manifest[part_name]
+    mesh = properties["part_mesh"]
+    center = properties["center_point"]
+    vectors = properties["extraction_vectors"]
+    
+    plotter = pv.Plotter(title=f"Extraction Axes: {part_name}")
+    plotter.add_mesh(pv.wrap(mesh), color="lightgray", opacity=0.8, show_edges=True)
 
-    # Add an arrow for the Local X-axis (Red)
-    arrow_x = pv.Arrow(start=center_point, direction=local_x_dir, scale=10)
+    # Add an arrow for the Local +X axis (Red)
+    arrow_x = pv.Arrow(start=center, direction=vectors["+x"], scale=15)
     plotter.add_mesh(arrow_x, color='red')
 
-    # Add an arrow for the Local Y-axis (Green)
-    arrow_y = pv.Arrow(start=center_point, direction=local_y_dir, scale=10)
+    # Add an arrow for the Local +Y axis (Green)
+    arrow_y = pv.Arrow(start=center, direction=vectors["+y"], scale=15)
     plotter.add_mesh(arrow_y, color='green')
 
-    # Add an arrow for the Local Z-axis (Blue)
-    arrow_z = pv.Arrow(start=center_point, direction=local_z_dir, scale=10)
+    # Add an arrow for the Local +Z axis (Blue)
+    arrow_z = pv.Arrow(start=center, direction=vectors["+z"], scale=15)
     plotter.add_mesh(arrow_z, color='blue')
 
-    # Show the interactive window
+    # Add a tiny sphere at the center point so we can see the origin of the arrows
+    plotter.add_mesh(pv.Sphere(radius=1.5, center=center), color='black')
+
     plotter.show()
 
 def visualize_narrow_phase(pseudo_faces, overlap_region, plotter, index, show = False):
@@ -780,55 +837,21 @@ def visualize_narrow_phase(pseudo_faces, overlap_region, plotter, index, show = 
 # For the loop i need to revert the transformation applied to part_b so i
 # can get extraction directions in the original frame
 if __name__ == "__main__":
-    
     assembly_manifest = load_assembly_from_folder('STLs/EndEffector')
-
+    
+    # 1. VISUALIZE FIRST! 
+    # Grab the name of the first part and visualize its axes
+    first_part = list(assembly_manifest.keys())[0]
+    visualize_part_axes(first_part, assembly_manifest)
+    
+    # 2. RUN THE HEAVY MATH
     start_time = time.time()
     final_matrices = calculate_IM_matrices(assembly_manifest)
-    print("--- %s seconds ---" % (time.time() - start_time))
     export_matrices_to_excel(final_matrices, assembly_manifest)
+    print(f"--- Time Taken: {(time.time() - start_time):.2f} seconds ---")
 
-    for key, matrix in final_matrices.items():
-        print(f'IM for {key}:')
-        for row in matrix:
-            print(row)
-
-
-    # Now we need to visualize the extraction directions to verify
-    part_a = assembly_manifest[list(assembly_manifest.keys())[0]]["part_mesh"]
-    part_b = assembly_manifest[list(assembly_manifest.keys())[1]]["part_mesh"]
-
-    # Get Oriented bounding box with respect to part a
-    to_origin_A, extents_A = trimesh.bounds.oriented_bounds(part_a)
-    from_origin_A = np.linalg.inv(to_origin_A)
-                
-    # Create auxiliary copies (to avoid modifying the original meshes)
-    part_a_aux = part_a.copy()
-    part_b_aux = part_b.copy()
-
-    # Apply transformation to align part_a with the world axes (so its OBB becomes an AABB)
-    part_a_aux.apply_transform(to_origin_A)
-    part_b_aux.apply_transform(to_origin_A)
-
-    # Get the solid bounding boxes
-    bbox_a = part_a_aux.bounding_box
-    bbox_b = part_b_aux.bounding_box
-
-    #visualize_extraction_directions(part_a_aux, part_b_aux)
-
-    overlap_region, overlap_result = check_2d_aabb_overlap(bbox_a.bounds, bbox_b.bounds, 'z')
-    pfs_a = create_PFs(part_a_aux, 'z')
-    for pf in pfs_a:
-        pf.get_focus_facets(overlap_region)
-    pfs_b = create_PFs(part_b_aux, 'z')
-    for pf in pfs_b:
-        pf.get_focus_facets(overlap_region)
-
-    plotter = pv.Plotter()
-    #visualize_narrow_phase(pfs_a, overlap_region, plotter, 0, show = True)
-    #visualize_narrow_phase(pfs_b, overlap_region, plotter, 1, show = True)
-    visualize_extraction_directions(part_a_aux, part_b_aux)
-    visualize_extraction_directions(part_b_aux, part_a_aux)
+    # 3. EXPORT THE ROBOT VECTORS
+    export_directions_to_excel(assembly_manifest)
 
 
 
