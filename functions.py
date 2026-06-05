@@ -4,6 +4,7 @@ import numpy as np
 import networkx as nx
 import os
 import pandas as pd
+import time
 from pathlib import Path
 from classes import PseudoFace
 from shapely.geometry import Polygon, MultiPolygon, GeometryCollection, LineString, Point
@@ -33,6 +34,7 @@ def check_2d_aabb_overlap(bounds_a, bounds_b, extraction_axis):
     all_axes.remove(axis_idx[extraction_axis])
     u_axis = all_axes[0]
     v_axis = all_axes[1]
+    w_axis = axis_idx[extraction_axis]
     
     # Extract the Min and Max for the U axis (e.g., the X axis)
     # bounds[0] is Min, bounds[1] is Max
@@ -67,8 +69,8 @@ def check_2d_aabb_overlap(bounds_a, bounds_b, extraction_axis):
     if not coaabb_overlap:
         return (overlap_region, -2)
 
-    a_min_w, a_max_w = bounds_a[0][extraction_axis], bounds_a[1][extraction_axis]
-    b_min_w, b_max_w = bounds_b[0][extraction_axis], bounds_b[1][extraction_axis]
+    a_min_w, a_max_w = bounds_a[0][w_axis], bounds_a[1][w_axis]
+    b_min_w, b_max_w = bounds_b[0][w_axis], bounds_b[1][w_axis]
 
     # Case 3: AABBs overlap and COAABBs overlap
     overlap_result = None
@@ -266,9 +268,11 @@ def check_3D_AABB_intersection(part_a, part_b):
     b_min_3d = part_b.bounds[0]
     b_max_3d = part_b.bounds[1]
 
-    if np.any(a_min_3d > b_max_3d) or np.any(a_max_3d < b_min_3d):
-        return [None, None, False]
-    return [(a_min_3d, a_max_3d), (b_min_3d, b_max_3d), True]
+    # Evaluate intersection boolean
+    intersects = not (np.any(a_min_3d > b_max_3d) or np.any(a_max_3d < b_min_3d))
+    
+    # Always return the tuples, just flip the boolean flag!
+    return [(a_min_3d, a_max_3d), (b_min_3d, b_max_3d), intersects]
 
 
 ## Narrow Phase Test functions (facet intersection)
@@ -609,7 +613,7 @@ def calculate_IM_matrices(assembly_manifest):
         
         # permutations handles the i and j loops instantly!
         for i, j in permutations(range(N), 2):
-            
+            print(f'Evaluating interference between "{part_keys[i]}" and "{part_keys[j]}" along {extraction_axis} axis...')
             part_a = assembly_manifest[part_keys[i]]["part_mesh"]
             part_b = assembly_manifest[part_keys[j]]["part_mesh"]
 
@@ -776,14 +780,18 @@ def visualize_narrow_phase(pseudo_faces, overlap_region, plotter, index, show = 
 # For the loop i need to revert the transformation applied to part_b so i
 # can get extraction directions in the original frame
 if __name__ == "__main__":
+    
+    assembly_manifest = load_assembly_from_folder('STLs/EndEffector')
 
-    assembly_manifest = load_assembly_from_folder('STLs')
-
+    start_time = time.time()
     final_matrices = calculate_IM_matrices(assembly_manifest)
+    print("--- %s seconds ---" % (time.time() - start_time))
     export_matrices_to_excel(final_matrices, assembly_manifest)
 
     for key, matrix in final_matrices.items():
-        print(f'IM for {key}:\n {matrix}')
+        print(f'IM for {key}:')
+        for row in matrix:
+            print(row)
 
 
     # Now we need to visualize the extraction directions to verify
@@ -818,7 +826,10 @@ if __name__ == "__main__":
 
     plotter = pv.Plotter()
     #visualize_narrow_phase(pfs_a, overlap_region, plotter, 0, show = True)
-    visualize_narrow_phase(pfs_b, overlap_region, plotter, 1, show = True)
+    #visualize_narrow_phase(pfs_b, overlap_region, plotter, 1, show = True)
+    visualize_extraction_directions(part_a_aux, part_b_aux)
+    visualize_extraction_directions(part_b_aux, part_a_aux)
+
 
 
 
