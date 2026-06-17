@@ -547,13 +547,14 @@ def evaluate_pair_interference(part_a_data, part_b_data, extraction_axis):
     part_b = part_b_data["part_mesh"]
     to_origin_A = part_a_data["to_origin"]
     
-    use_MRT = check_static_interference(part_a, part_b)
-    parts_AABB_interfere = check_3D_AABB_intersection(part_a, part_b)
-    
-    # 1. Transformation and Broad Phase (Using the cached matrix!)
     part_a_aux, part_b_aux = part_a.copy(), part_b.copy()
     part_a_aux.apply_transform(to_origin_A)
     part_b_aux.apply_transform(to_origin_A)
+
+    parts_AABB_interfere = check_3D_AABB_intersection(part_a_aux, part_b_aux)
+    use_MRT = check_static_interference(part_a_aux, part_b_aux)
+    if parts_AABB_interfere[2] == True:
+        use_MRT = True
 
     overlap_region, overlap_result = check_2d_aabb_overlap(
         part_a_aux.bounding_box.bounds, part_b_aux.bounding_box.bounds, extraction_axis
@@ -568,11 +569,9 @@ def evaluate_pair_interference(part_a_data, part_b_data, extraction_axis):
     # 2. PseudoFace Generation
     pseudo_faces_a = create_PFs(part_a_aux, extraction_axis)
     pseudo_faces_b = create_PFs(part_b_aux, extraction_axis)
-
     for pf_a in pseudo_faces_a: pf_a.get_focus_facets(overlap_region)
     for pf_b in pseudo_faces_b: pf_b.get_focus_facets(overlap_region)
 
-    # 3. Narrow Phase (The Three-Tier Check)
     max_pos, max_neg = 0, 0
     full_interference = False
     
@@ -598,7 +597,6 @@ def evaluate_pair_interference(part_a_data, part_b_data, extraction_axis):
                 final_pos, final_neg = max(final_pos, c_pos), max(final_neg, c_neg)
                 if final_pos == 2 and final_neg == 2: break 
 
-        # Track the absolute worst-case collision for the whole part pair
         max_pos, max_neg = max(max_pos, final_pos), max(max_neg, final_neg)
         if max_pos == 2 and max_neg == 2:
             full_interference = True
@@ -616,13 +614,18 @@ def calculate_IM_matrices(assembly_manifest):
         print(f'\n----------------- Checking {extraction_axis} Direction -----------------')
         
         for i, j in permutations(range(N), 2):
+            part_a_name = part_keys[i]
+            part_b_name = part_keys[j]
             
-            # ---> Grab the whole dictionary for the part, not just the mesh! <---
-            part_a_data = assembly_manifest[part_keys[i]]
-            part_b_data = assembly_manifest[part_keys[j]]
+            part_a_data = assembly_manifest[part_a_name]
+            part_b_data = assembly_manifest[part_b_name]
 
-            # Pass the dictionaries to the helper function
-            pos_val, neg_val = evaluate_pair_interference(part_a_data, part_b_data, extraction_axis)
+            # Names perfectly synced with the updated helper function
+            pos_val, neg_val = evaluate_pair_interference(
+                part_a_data, part_b_data, extraction_axis)
+            # pos_val, neg_val = evaluate_pair_interference(
+            #     part_a_data, part_b_data, extraction_axis, part_a_name, part_b_name
+            # )
             
             matrices[pos_key][i, j] = pos_val
             matrices[neg_key][i, j] = neg_val
@@ -630,6 +633,33 @@ def calculate_IM_matrices(assembly_manifest):
     return matrices
 
 ## Data Handling
+def clean_obb_matrix(to_origin, tolerance=0.05):
+    """
+    Snaps microscopic noise to 0/1, then uses Singular Value Decomposition (SVD) 
+    to guarantee the resulting matrix is a perfectly orthogonal 3D rotation matrix.
+    """
+    matrix = to_origin.copy()
+    rot = matrix[:3, :3]
+    
+    # 1. Snap the microscopic noise on intended flush axes
+    rot[np.abs(rot) < tolerance] = 0.0
+    rot[np.abs(rot - 1.0) < tolerance] = 1.0
+    rot[np.abs(rot + 1.0) < tolerance] = -1.0
+    
+    # 2. SVD Re-Orthogonalization 
+    # This takes the snapped matrix and mathematically forces the axes to be exactly 
+    # 90 degrees apart and length 1.0, completely preventing CAD mesh warping!
+    U, _, Vt = np.linalg.svd(rot)
+    perfect_rot = np.dot(U, Vt)
+    
+    # 3. Failsafe: Ensure it's a true rotation (determinant of +1) and not a reflection
+    if np.linalg.det(perfect_rot) < 0:
+        Vt[2, :] *= -1
+        perfect_rot = np.dot(U, Vt)
+        
+    matrix[:3, :3] = perfect_rot
+    return matrix
+
 def load_assembly_from_folder(folder_path):
     assembly_manifest = {}
     matrix_idx = 0
@@ -655,10 +685,14 @@ def load_assembly_from_folder(folder_path):
         
         # Get the Oriented Bounding Box transformation matrix
         to_origin, extents = trimesh.bounds.oriented_bounds(mesh_geom)
-        from_origin = np.linalg.inv(to_origin)
         
-        # Extract the 3D vectors for the 6 directions (columns of the rotation matrix)
-        # These are the exact 3D vectors the robot needs to pull the part!
+        # ---> Clean the matrix and re-orthogonalize it! <---
+        to_origin = clean_obb_matrix(to_origin)
+        
+        # Because the matrix is now mathematically perfect, the inverse will be flawless
+        from_origin = np.linalg.inv(to_origin)
+
+        # Structure the inner data dictionary
         extraction_vectors = {
             "+x": from_origin[:3, 0],
             "-x": -from_origin[:3, 0],
