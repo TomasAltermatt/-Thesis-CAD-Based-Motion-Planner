@@ -10,8 +10,8 @@ from classes import PseudoFace
 from shapely.geometry import Polygon, MultiPolygon, GeometryCollection, LineString, Point
 from itertools import product, permutations
 
-ANGLE_NORMAL_TOL = 0.5
-DISTANCE_TOL = 1*10**-4
+ANGLE_NORMAL_TOL = 0.95
+DISTANCE_TOL = 1e-4
 
 # ----------------------------------------------------- MAIN FUNCTIONS ----------------------------------------------
 ## AABB overlap test functions
@@ -56,8 +56,7 @@ def check_2d_aabb_overlap(bounds_a, bounds_b, extraction_axis):
     overlap_min_v = max(a_min_v, b_min_v)
     overlap_max_v = min(a_max_v, b_max_v)
 
-    # Use the CAD tolerance to prevent mesh noise from deleting triangles
-    buffer = 1e-4 
+    buffer = DISTANCE_TOL
     overlap_region['overlap_u'] = (overlap_min_u - buffer, overlap_max_u + buffer)
     overlap_region['overlap_v'] = (overlap_min_v - buffer, overlap_max_v + buffer)
 
@@ -77,10 +76,9 @@ def check_2d_aabb_overlap(bounds_a, bounds_b, extraction_axis):
     a_min_w, a_max_w = bounds_a[0][w_axis], bounds_a[1][w_axis]
     b_min_w, b_max_w = bounds_b[0][w_axis], bounds_b[1][w_axis]
 
-    # ---> THE OVERRIDE FIX <---
-    # Changed to strictly >. Flush parts safely fall to -2!
+    overlap_result = None
     if a_min_w > b_max_w + DISTANCE_TOL:
-        overlap_result = -1 
+         overlap_result = -1 
     elif b_min_w > a_max_w + DISTANCE_TOL:
         overlap_result = 1   
     else:
@@ -170,55 +168,88 @@ def create_PFs(part: trimesh.Trimesh, extraction_axis: str, tolerance = ANGLE_NO
     return [PseudoFace(part, list(c), extraction_axis) for c in components if len(c) > 0]
 
 def check_PF_overlap(pf_a: PseudoFace, pf_b: PseudoFace):
-    
-    result = [-2, -2]
-    # Dynamic axis selection using the class attribute
+    result = [0, 0] 
     w_idx = pf_a.extraction_axis
 
-    # Pseudoface A bounding box 2D limits and dynamic depth limits
     a_min_u, a_min_v = pf_a.triangles_2d.min(axis=(0,1))
     a_max_u, a_max_v = pf_a.triangles_2d.max(axis=(0,1))
-
-    # Squash axis 0 (triangles) and axis 1 (vertices) to get true 3D bounding box
     a_min_w = pf_a.triangles_3d[:, :, w_idx].min()
     a_max_w = pf_a.triangles_3d[:, :, w_idx].max()
 
-    # Pseudoface B bounding box 2D limits and dynamic depth limits
     b_min_u, b_min_v = pf_b.triangles_2d.min(axis=(0,1))
     b_max_u, b_max_v = pf_b.triangles_2d.max(axis=(0,1))
-    
     b_min_w = pf_b.triangles_3d[:, :, w_idx].min()
     b_max_w = pf_b.triangles_3d[:, :, w_idx].max()
 
-    # Calculate overlap region in 2D
     overlap_min_u = max(a_min_u, b_min_u)
     overlap_max_u = min(a_max_u, b_max_u)
     overlap_min_v = max(a_min_v, b_min_v)
     overlap_max_v = min(a_max_v, b_max_v)
 
-    # Filter 2: Check if the 2D bounding boxes of the pseudo-faces overlap
+    # ---> X-AXIS FIX: REVERTED TO <= <---
     if not ((overlap_min_u <= overlap_max_u) and (overlap_min_v <= overlap_max_v)):
         return [0, 0] 
     
-    # Check COAABB overlap
     a_lims = [(a_min_u, a_max_u), (a_min_v, a_max_v)]
     b_lims = [(b_min_u, b_max_u), (b_min_v, b_max_v)]
     coaabb_overlap = check_COAABB_overlap(a_lims, b_lims)
 
     if not coaabb_overlap:
-        # AABBs overlap roughly, but the tighter COAABBs missed each other. Safe.
         return [0, 0] 
-    
-    # We change this to -2 so perfectly flush parts go to the Narrow Phase
+
+    # ---> EXACT SHAPELY OVERLAP FILTER <---
+    # Destroys the "CameraBase Hole" paradox by checking exact polygons, not AABBs!
+    min_b_all = pf_b.triangles_2d.min(axis=1)
+    max_b_all = pf_b.triangles_2d.max(axis=1)
+
+    actual_overlap = False
+    for tri_a in pf_a.triangles_2d:
+        min_a = tri_a.min(axis=0)
+        max_a = tri_a.max(axis=0)
+        
+        # Fast Array AABB pre-check to save time
+        overlap_u = (min_a[0] <= max_b_all[:, 0]) & (max_a[0] >= min_b_all[:, 0])
+        overlap_v = (min_a[1] <= max_b_all[:, 1]) & (max_a[1] >= min_b_all[:, 1])
+
+        candidate_b_indices = np.where(overlap_u & overlap_v)[0]
+        
+        # Only build Shapely Polygons for the bounding boxes that actually touch
+        if len(candidate_b_indices) > 0:
+            poly_a = Polygon(tri_a)
+            for idx_b in candidate_b_indices:
+                poly_b = Polygon(pf_b.triangles_2d[idx_b])
+                if poly_a.intersects(poly_b):
+                    actual_overlap = True
+                    break
+        if actual_overlap:
+            break
+
+    if not actual_overlap:
+        return [0, 0] 
+
+    # -------------------------------------------------------------
+    # YOUR 2s ARE EXACTLY AS YOU WROTE THEM. NO -2s.
+    # -------------------------------------------------------------
     if a_max_w >= b_min_w and a_min_w <= b_max_w:
         return [-2, -2]  
 
-    # ---> THE OVERRIDE FIX <---
-    # Changed to strictly >. If they are flush, it won't overwrite your -2!
+    # ---> THE NORMAL CHECK FIX <---
+    # Solves the ZED trailing edge paradox in Y and Z without breaking X!
+    # Forces the engine to verify the faces are pointing at each other before declaring a crash.
+    normal_a = pf_a.part.face_normals[pf_a.face_indices[0]][w_idx]
+    normal_b = pf_b.part.face_normals[pf_b.face_indices[0]][w_idx]
+
     if a_min_w > b_max_w + DISTANCE_TOL:
-        result[1] = 2 
+        # A is physically "behind" B. 
+        # A moving forward ONLY crashes if A faces forward and B faces backward.
+        if normal_a < -0.1 and normal_b > 0.1:
+            result[1] = 2 
+            
     if b_min_w > a_max_w + DISTANCE_TOL:
-        result[0] = 2  
+        # B is physically "behind" A.
+        # A moving backward ONLY crashes if A faces backward and B faces forward.
+        if normal_a > 0.1 and normal_b < -0.1:
+            result[0] = 2  
 
     return result
 
@@ -328,53 +359,6 @@ def filter_facets(pf_a: PseudoFace, pf_b: PseudoFace, AABB_3d_intersection, only
 
     return candidates_a, candidates_b
 
-# def filter_facets(pf_a: PseudoFace, pf_b: PseudoFace, AABB_3d_intersection, only_focus_facets = False, tolerance = 1e-4):
-#     w_idx = pf_a.extraction_axis
-#     a_min_3d, a_max_3d = AABB_3d_intersection[0]
-#     b_min_3d, b_max_3d = AABB_3d_intersection[1]
-#     parts_intersect = AABB_3d_intersection[2]
-
-#     w1_max = b_max_3d[w_idx]
-#     w0_min = a_min_3d[w_idx]
-
-#     candidates_a, candidates_b = [], []
-
-#     list_to_check_a = pf_a.focus_facets if only_focus_facets else range(len(pf_a.triangles_3d))
-#     list_to_check_b = pf_b.focus_facets if only_focus_facets else range(len(pf_b.triangles_3d))
-
-#     # --- PART A LOOP ---
-#     for local_idx in list_to_check_a:
-#         global_idx = pf_a.face_indices[local_idx] # <--- THE GLOBAL FIX
-#         facet_a = pf_a.triangles_3d[local_idx]
-#         min_w = facet_a[:, w_idx].min()
-#         max_w = facet_a[:, w_idx].max()
-#         normal_w = pf_a.part.face_normals[global_idx][w_idx] # <--- THE GLOBAL FIX
-
-#         if not parts_intersect:
-#             if abs(normal_w) > tolerance: candidates_a.append(local_idx)
-#         else:
-#             if max_w >= w1_max and normal_w > tolerance:  
-#                 candidates_a.append(local_idx)
-#             elif min_w < w1_max and normal_w < -tolerance:
-#                 candidates_a.append(local_idx)
-
-#     # --- PART B LOOP ---
-#     for local_idx in list_to_check_b:       
-#         global_idx = pf_b.face_indices[local_idx] # <--- THE GLOBAL FIX
-#         facet_b = pf_b.triangles_3d[local_idx]
-#         min_w = facet_b[:, w_idx].min()
-#         max_w = facet_b[:, w_idx].max()
-#         normal_w = pf_b.part.face_normals[global_idx][w_idx] # <--- THE GLOBAL FIX
-
-#         if not parts_intersect:
-#             if abs(normal_w) > tolerance: candidates_b.append(local_idx)
-#         else:
-#             if max_w > w0_min and normal_w > tolerance:
-#                 candidates_b.append(local_idx)
-#             elif min_w <= w0_min and normal_w < -tolerance:
-#                 candidates_b.append(local_idx)
-
-#     return candidates_a, candidates_b
 
 
 def hybrid_facet_intersection_test(poly_a: Polygon, poly_b: Polygon, use_MRT, MRT_tolerance = 1e-4):
@@ -582,9 +566,11 @@ def evaluate_pair_interference(part_a_data, part_b_data, extraction_axis):
 
     max_pos, max_neg = 0, 0
     full_interference = False
-    # plotter = pv.Plotter()
-    # visualize_pseudofaces(part_a_aux, pseudo_faces_a, plotter, 1)
-    # visualize_pseudofaces(part_b_aux, pseudo_faces_b, plotter, 2, show = True)
+    
+    # if extraction_axis == 'y':
+    #     plotter = pv.Plotter()
+    #     visualize_pseudofaces(part_a_aux, pseudo_faces_a, plotter, 1)
+    #     visualize_pseudofaces(part_b_aux, pseudo_faces_b, plotter, 2, show = True)
     current_pf_intersect = [0, 0]
     for pf_a, pf_b in product(pseudo_faces_a, pseudo_faces_b):
         if full_interference:
