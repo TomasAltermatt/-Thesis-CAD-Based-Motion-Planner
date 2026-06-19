@@ -80,7 +80,7 @@ def check_2d_aabb_overlap(bounds_a, bounds_b, extraction_axis):
         overlap_result = 1   # Part A cannot be extracted in extraction direction without colliding with B, 
 
     else:
-        overlap_result = 2   # Part A cannot be extracted in either direction without colliding with B
+        overlap_result = -2   # Part A cannot be extracted in either direction without colliding with B
 
     return (overlap_region, overlap_result)
 
@@ -111,30 +111,44 @@ def check_COAABB_overlap(a_lims, b_lims, epsilon = 0.05):
     return (cond1 and cond2) or (cond3 and cond4)
 
 
-## Pseudo Face overlap test functions
-def create_PFs(part: trimesh.Trimesh, extraction_axis: str, tolerance = 1e-4):
+## Pseudo Face overlap test functions 
+
+
+def create_PFs(part: trimesh.Trimesh, extraction_axis: str, tolerance = 0.05):
     axis_idx = {"x": 0, "y": 1, "z": 2}
-    all_axes = [0, 1, 2]
-    all_axes.remove(axis_idx[extraction_axis])
-    u_axis = all_axes[0]
-    v_axis = all_axes[1]
+    w_idx = axis_idx[extraction_axis]
 
-    # Get face normals for the part in line with the extraction axis
-    normals_w = part.face_normals[:, axis_idx[extraction_axis]]
-    valid_faces_mask = np.abs(normals_w) > tolerance
-    valid_face_indices = np.where(valid_faces_mask)[0]
-    
-    # Check if the left and right triangles of face adjacency are valid
-    left_valid_mask = np.isin(part.face_adjacency[:, 0], valid_face_indices)
-    right_valid_mask = np.isin(part.face_adjacency[:, 1], valid_face_indices)
-    both_valid_mask = left_valid_mask & right_valid_mask
-    valid_pairs = part.face_adjacency[both_valid_mask]
+    normals_w = part.face_normals[:, w_idx]
 
-    # Create graph to find connected triangles via valid_pairs
-    G = nx.Graph()
-    G.add_edges_from(valid_pairs)
+    # Strict Directional Separation 
+    pos_mask = normals_w > tolerance
+    neg_mask = normals_w < -tolerance
 
-    return [PseudoFace(part, c, extraction_axis) for c in list(nx.connected_components(G))]
+    pos_indices = np.where(pos_mask)[0]
+    neg_indices = np.where(neg_mask)[0]
+
+    # Get the raw adjacency list
+    adj = part.face_adjacency
+
+    # ---> FIX 2: Only connect triangles that point the SAME way <---
+    pos_pairs = adj[np.isin(adj[:, 0], pos_indices) & np.isin(adj[:, 1], pos_indices)]
+    neg_pairs = adj[np.isin(adj[:, 0], neg_indices) & np.isin(adj[:, 1], neg_indices)]
+
+    # Build the Positive Graph
+    G_pos = nx.Graph()
+    G_pos.add_nodes_from(pos_indices) # ---> FIX 3: Saves isolated triangles!
+    G_pos.add_edges_from(pos_pairs)
+
+    # Build the Negative Graph
+    G_neg = nx.Graph()
+    G_neg.add_nodes_from(neg_indices) # ---> FIX 3: Saves isolated triangles!
+    G_neg.add_edges_from(neg_pairs)
+
+    # Combine the isolated components from both graphs
+    components = list(nx.connected_components(G_pos)) + list(nx.connected_components(G_neg))
+
+    # Convert to a list to ensure compatibility with your PseudoFace class
+    return [PseudoFace(part, list(c), extraction_axis) for c in components if len(c) > 0]
 
 def check_PF_overlap(pf_a: PseudoFace, pf_b: PseudoFace):
     result = [-2, -2]
@@ -144,7 +158,7 @@ def check_PF_overlap(pf_a: PseudoFace, pf_b: PseudoFace):
     # Pseudoface A bounding box 2D limits and dynamic depth limits
     a_min_u, a_min_v = pf_a.triangles_2d.min(axis=(0,1))
     a_max_u, a_max_v = pf_a.triangles_2d.max(axis=(0,1))
-    
+
     # Squash axis 0 (triangles) and axis 1 (vertices) to get true 3D bounding box
     a_min_w = pf_a.triangles_3d[:, :, w_idx].min()
     a_max_w = pf_a.triangles_3d[:, :, w_idx].max()
@@ -286,118 +300,91 @@ def check_static_interference(part_a, part_b):
     return is_colliding
 
 def filter_facets(pf_a: PseudoFace, pf_b: PseudoFace, AABB_3d_intersection, only_focus_facets = False, tolerance = 1e-4):
-    w_idx = pf_a.extraction_axis # Same for both pf_a or pf_b
+    w_idx = pf_a.extraction_axis
     a_min_3d, a_max_3d = AABB_3d_intersection[0]
     b_min_3d, b_max_3d = AABB_3d_intersection[1]
     parts_intersect = AABB_3d_intersection[2]
-    
+
     w1_max = b_max_3d[w_idx]
     w0_min = a_min_3d[w_idx]
 
-    candidates_a = []
-    candidates_b = []
+    candidates_a, candidates_b = [], []
 
-    list_to_check_a = pf_a.focus_facets if only_focus_facets else pf_a.triangles_3d
-    list_to_check_b = pf_b.focus_facets if only_focus_facets else pf_b.triangles_3d
+    list_to_check_a = pf_a.focus_facets if only_focus_facets else range(len(pf_a.triangles_3d))
+    list_to_check_b = pf_b.focus_facets if only_focus_facets else range(len(pf_b.triangles_3d))
 
     # --- PART A LOOP ---
-    for idx in range(len(list_to_check_a)):
-        local_idx = idx if not only_focus_facets else pf_a.focus_facets[idx]
+    for local_idx in list_to_check_a:
+        global_idx = pf_a.face_indices[local_idx] # <--- THE GLOBAL FIX
         facet_a = pf_a.triangles_3d[local_idx]
         min_w = facet_a[:, w_idx].min()
         max_w = facet_a[:, w_idx].max()
-        normal_w = pf_a.part.face_normals[local_idx][w_idx]
+        normal_w = pf_a.part.face_normals[global_idx][w_idx] # <--- THE GLOBAL FIX
 
-        # If the parts dont intersect we check those with normals pointing towards the extraction direction
         if not parts_intersect:
-            if abs(normal_w) > 0:
-                candidates_a.append(local_idx)
-        
-        # If they do intersect we filter according to facet normals
+            if abs(normal_w) > tolerance: candidates_a.append(local_idx)
         else:
-            if max_w >= w1_max and normal_w > 0:  # <--- FIXED TARGET (w1_max)
+            if max_w >= w1_max and normal_w > tolerance:  
                 candidates_a.append(local_idx)
-            elif min_w < w1_max and normal_w < 0:
+            elif min_w < w1_max and normal_w < -tolerance:
                 candidates_a.append(local_idx)
 
     # --- PART B LOOP ---
-    for idx in range(len(list_to_check_b)):       # <--- FIXED LOOP VARIABLE (idx)
-        local_idx = idx if not only_focus_facets else pf_b.focus_facets[idx]
-        
+    for local_idx in list_to_check_b:       
+        global_idx = pf_b.face_indices[local_idx] # <--- THE GLOBAL FIX
         facet_b = pf_b.triangles_3d[local_idx]
         min_w = facet_b[:, w_idx].min()
         max_w = facet_b[:, w_idx].max()
-        normal_w = pf_b.part.face_normals[local_idx][w_idx]
+        normal_w = pf_b.part.face_normals[global_idx][w_idx] # <--- THE GLOBAL FIX
 
-        # If the parts dont intersect we check those with normals pointing towards the extraction direction
         if not parts_intersect:
-            if abs(normal_w) > 0:
-                candidates_b.append(local_idx)
-        
-        # If they do intersect we filter according to facet normals
+            if abs(normal_w) > tolerance: candidates_b.append(local_idx)
         else:
-            if max_w > w0_min and normal_w > 0:
+            if max_w > w0_min and normal_w > tolerance:
                 candidates_b.append(local_idx)
-            elif min_w <= w0_min and normal_w < 0:
+            elif min_w <= w0_min and normal_w < -tolerance:
                 candidates_b.append(local_idx)
 
     return candidates_a, candidates_b
 
-def hybrid_facet_intersection_test(part_a, part_b, facet_a, facet_b, use_MRT, MRT_tolerance = 1e-4):
-    # 1. Check AABB of facets in 3D to discard impossible pairs instantly
-    a_min = facet_a.min(axis=0)
-    a_max = facet_a.max(axis=0)
-    b_min = facet_b.min(axis=0)
-    b_max = facet_b.max(axis=0)
 
-    if (a_min[0] > b_max[0] or a_max[0] < b_min[0] or
-        a_min[1] > b_max[1] or a_max[1] < b_min[1] or
-        a_min[2] > b_max[2] or a_max[2] < b_min[2]):
-        return 0 # If the boxes don't overlap in any dimension, they can't touch!
-    
-    # Revise specific indexing since i dont yet know how to input the facets
-    poly_a = Polygon(facet_a[:, :2]) # Project to 2D (U and V)
-    poly_b = Polygon(facet_b[:, :2]) # Project to 2D (U and V)
-    
-    # 3. Case 1: If there is static interference we use MRT
+def hybrid_facet_intersection_test(poly_a: Polygon, poly_b: Polygon, use_MRT, MRT_tolerance = 1e-4):
+    # We use the dynamic 2D polygons passed from the Narrow Phase.
+    # This permanently destroys the hardcoded [:, :2] XY bug!
+    if not poly_a.intersects(poly_b):
+        return 0 
+
     if use_MRT:
         overlap_poly = poly_a.intersection(poly_b)
+        
+        # Failsafe for 0-area overlapping lines
+        if overlap_poly.is_empty or overlap_poly.area < 1e-8:
+            return 1 
+        
         min_u, min_v, max_u, max_v = overlap_poly.bounds
-
-        overlap_width = max_u - min_u
-        overlap_height = max_v - min_v
-
-        overlap_distance = min(overlap_width, overlap_height)
-         
+        overlap_distance = min(max_u - min_u, max_v - min_v)
+            
         if overlap_distance < MRT_tolerance:
-            return 1 # If the overlapping area is very small, we consider it a minor interference (1)
+            return 1 
         
         return 2
     
-    # 4. Case 2: If there is no static interference we check with standard collision tests with polygon intersection
-    if not poly_a.intersects(poly_b):
-        return 0 # If the 2D projections don't intersect, they can't collide
     return 2
 
+# OK
 def get_primitive_points(poly_a: Polygon, poly_b: Polygon):
     if not poly_a.intersects(poly_b):
-            return np.empty((0, 2))
+        return np.empty((0, 2))
 
     overlap = poly_a.intersection(poly_b)
     raw_coords = []
 
-    # Case A: Standard single overlapping polygon area
     if isinstance(overlap, Polygon):
         raw_coords.extend(list(overlap.exterior.coords)[:-1])
-
-    # Case B: Multiple separated overlapping areas (MultiPolygon)
     elif isinstance(overlap, MultiPolygon):
         for poly in overlap.geoms:
             raw_coords.extend(list(poly.exterior.coords)[:-1])
-
-    # Case C: Lower-dimension contacts (LineString, Point, or Collections)
     else:
-        # If it's a line touch or vertex point touch, extract coordinates directly
         if hasattr(overlap, 'coords'):
             raw_coords.extend(list(overlap.coords))
         elif hasattr(overlap, 'geoms'):
@@ -405,137 +392,115 @@ def get_primitive_points(poly_a: Polygon, poly_b: Polygon):
                 if hasattr(geom, 'coords'):
                     raw_coords.extend(list(geom.coords))
 
-    # Remove any duplicate coordinate entries to keep the points unique
     if len(raw_coords) > 0:
         unique_pts = np.unique(np.array(raw_coords), axis=0)
-    
-    # Project these unique points onto the facet
-        
+        return unique_pts
+
     return np.empty((0, 2))
 
 def primitive_point_projection(pf, facet_idx, primitive_points):
-    # Solve equation of type A*u + B*v * C*w + D = 0 so we can extract w coordinate of
-    # primitive points projected on the facet plane
+    global_idx = pf.face_indices[facet_idx]
 
-    # Obtain pseudoface normals on each axis
-    nu = pf.part.face_normals[facet_idx][pf.u_axis]
-    nv = pf.part.face_normals[facet_idx][pf.v_axis]
-    nw = pf.part.face_normals[facet_idx][pf.extraction_axis]
+    clean_axis = str(pf.extraction_axis).lower().replace("+", "").replace("-", "")
+    w_idx = {"x": 0, "y": 1, "z": 2}.get(clean_axis, 0)
+    axes = [0, 1, 2]
+    axes.remove(w_idx)
+    u_idx, v_idx = axes[0], axes[1]
 
-    # Get any point on the facet (e.g., the first vertex of the triangle)
-    u0 = pf.triangles_3d[facet_idx][0, pf.u_axis]
-    v0 = pf.triangles_3d[facet_idx][0, pf.v_axis]
-    w0 = pf.triangles_3d[facet_idx][0, pf.extraction_axis]
+    nu = pf.part.face_normals[global_idx][u_idx]
+    nv = pf.part.face_normals[global_idx][v_idx]
+    nw = pf.part.face_normals[global_idx][w_idx]
 
-    # Solve linear plane equation
+    u0 = pf.triangles_3d[facet_idx][0, u_idx]
+    v0 = pf.triangles_3d[facet_idx][0, v_idx]
+    w0 = pf.triangles_3d[facet_idx][0, w_idx]
+
     D = -(nu * u0 + nv * v0 + nw * w0)
-    projected_w = -(nu * primitive_points[:, 0] + nv * primitive_points[:, 1] + D) / nw
 
-    # Return 3D coordinates of projected points
+    if abs(nw) < 1e-6:
+        projected_w = np.full(primitive_points.shape[0], w0)
+    else:
+        projected_w = -(nu * primitive_points[:, 0] + nv * primitive_points[:, 1] + D) / nw
+
     projected_points_3d = np.zeros((primitive_points.shape[0], 3))
-    projected_points_3d[:, pf.u_axis] = primitive_points[:, 0]
-    projected_points_3d[:, pf.v_axis] = primitive_points[:, 1]
-    projected_points_3d[:, pf.extraction_axis] = projected_w
+    projected_points_3d[:, u_idx] = primitive_points[:, 0]
+    projected_points_3d[:, v_idx] = primitive_points[:, 1]
+    projected_points_3d[:, w_idx] = projected_w
 
     return projected_points_3d
 
-def IM_entry_calculation(pf_a, facet_idx_a, pf_b, facet_idx_b, primitive_points_a, primitive_points_b,
-                         interference_type):
-    offset_tolerance = 1e-4
-    a_ij = 0
-    a_ji = 0
+def IM_entry_calculation(pf_a, facet_idx_a, pf_b, facet_idx_b, primitive_points_a, primitive_points_b, interference_type):
+    global_idx_a = pf_a.face_indices[facet_idx_a]
+    global_idx_b = pf_b.face_indices[facet_idx_b]
 
-    # Get 3d w bounds of the facets
-    w_bounds_a = pf_a.triangles_3d[facet_idx_a][:, pf_a.extraction_axis]
-    w_bounds_b = pf_b.triangles_3d[facet_idx_b][:, pf_b.extraction_axis]
+    clean_axis = str(pf_a.extraction_axis).lower().replace("+", "").replace("-", "")
+    w_idx = {"x": 0, "y": 1, "z": 2}.get(clean_axis, 0)
 
-    w_max_a = max(w_bounds_a)
-    w_min_a = min(w_bounds_a)
-    w_max_b = max(w_bounds_b)
-    w_min_b = min(w_bounds_b)
+    normal_a = pf_a.part.face_normals[global_idx_a][w_idx]
+    normal_b = pf_b.part.face_normals[global_idx_b][w_idx]
 
-    # Get normal components in the extraction direction
-    normal_w_a = pf_a.part.face_normals[facet_idx_a][pf_a.extraction_axis]
-    normal_w_b = pf_b.part.face_normals[facet_idx_b][pf_b.extraction_axis]
-
-    entry_dict = {"minor": 1, "major": 2}
-    entry_val = interference_type
-
-
-    # check if the primitive points of A are same as those of B
-    # pick any 2 vertexes of the facets and check if dot product of difference vector with the normal is 0
-    diff_vector = pf_a.triangles_3d[facet_idx_a][0] - pf_b.triangles_3d[facet_idx_b][0]
-    offset = np.dot(diff_vector, pf_a.part.face_normals[facet_idx_a])
-    # check if facets are flush and parallel (same normals and zero offset)
-    same_plane = abs(offset) < offset_tolerance and abs(np.dot(diff_vector, pf_b.part.face_normals[facet_idx_b])) < offset_tolerance
-
-
-    if w_max_a <= w_min_b and w_min_a != w_max_b:
-        a_ij = entry_val # A is fully on the negative extraction side of B, but they are not perfectly flush (which would be a static interference)
-
-    elif w_max_b <= w_min_a and w_max_a != w_min_b:
-        a_ji = entry_val # B is fully on the negative extraction side of A, but they are not perfectly flush (which would be a static interference)
+    a_ij, a_ji = 0, 0
     
-    elif not same_plane:
-        for i in range(primitive_points_a.shape[0]):
-            w_prim_a = primitive_points_a[i][pf_a.extraction_axis]
-            w_prim_b = primitive_points_b[i][pf_b.extraction_axis]
+    w_tol = 0.05 # 0.05mm depth tolerance prevents CAD micro-overlap errors
+    n_tol = 0.05 # 0.05 normal tolerance (~3 degrees) mathematically ignores mesh noise on sliding rails
 
-            if abs(w_prim_a - w_prim_b) < 1e-3:
-                continue 
-            elif w_prim_a < w_prim_b:
-                a_ij = entry_val # Primitive point of A is on the negative extraction side of B
-            else:                
-                a_ji = entry_val # Primitive point of B is on the negative extraction side of A
-            
-            # Check if both entries are != 0 so we stop checking further
-            if a_ij != 0 and a_ji != 0:
-                break
-            
-    else:
-        if (normal_w_a > 0 and normal_w_b > 0) :
-            a_ij = entry_val # They are parallel and facing the same direction, so we consider it a minor interference (1)
-        elif (normal_w_a < 0 and normal_w_b < 0):
-            a_ji = entry_val # They are parallel and facing the same direction, so we consider it a minor interference (1)
-        else:
-            a_ij = entry_val # They interfere for extraction of both parts in the same direction
-            a_ji = entry_val
-    
+    for i in range(primitive_points_a.shape[0]):
+        w_prim_a = primitive_points_a[i][w_idx]
+        w_prim_b = primitive_points_b[i][w_idx]
+
+        # A points +W, B points -W (e.g. Lid pushes +X into Base -X stopper)
+        if normal_a > n_tol and normal_b < -n_tol:
+            # A hits B if A is physically behind B or flush with B
+            if w_prim_a <= w_prim_b + w_tol:
+                a_ij = interference_type
+
+        # A points -W, B points +W (e.g. Lid pushes -X into Base +X stopper)
+        elif normal_a < -n_tol and normal_b > n_tol:
+            # A hits B if A is physically in front of B or flush with B
+            if w_prim_a >= w_prim_b - w_tol:
+                a_ji = interference_type
+
+        # Once both directions are blocked for this pair, no need to keep checking points
+        if a_ij != 0 and a_ji != 0: break
+
     return a_ij, a_ji
 
 def evaluate_narrow_phase(candidates_a, candidates_b, pf_a, pf_b, part_a_aux, part_b_aux, use_MRT):
-    """Evaluates pairs of candidate triangles and returns the maximum directional interference."""
-    max_pos = 0
-    max_neg = 0
-    
-    # product() flattens the double loop into ONE level of indentation!
-    for idx_a, idx_b in product(candidates_a, candidates_b):
-        facet_a = pf_a.triangles_3d[idx_a]
-        facet_b = pf_b.triangles_3d[idx_b]
-        
-        hybrid_result = hybrid_facet_intersection_test(
-            part_a_aux, part_b_aux, facet_a, facet_b, use_MRT
-        )
+    max_pos, max_neg = 0, 0
 
-        if hybrid_result not in [1, 2]:
+    for idx_a, idx_b in product(candidates_a, candidates_b):
+        # FAST 2D AABB CULLING
+        min_a = pf_a.triangles_2d[idx_a].min(axis=0)
+        max_a = pf_a.triangles_2d[idx_a].max(axis=0)
+        min_b = pf_b.triangles_2d[idx_b].min(axis=0)
+        max_b = pf_b.triangles_2d[idx_b].max(axis=0)
+
+        if (min_a[0] > max_b[0] + 1e-5 or max_a[0] < min_b[0] - 1e-5 or
+            min_a[1] > max_b[1] + 1e-5 or max_a[1] < min_b[1] - 1e-5):
             continue
 
-        primitive_all = get_primitive_points(facet_a, facet_b)
+        poly_a = Polygon(pf_a.triangles_2d[idx_a])
+        poly_b = Polygon(pf_b.triangles_2d[idx_b])
+
+        hybrid_result = hybrid_facet_intersection_test(poly_a, poly_b, use_MRT)
+        if hybrid_result not in [1, 2]: continue
+
+        # ---> RESTORED PRIMITIVE POINTS <---
+        primitive_all = get_primitive_points(poly_a, poly_b)
+        if len(primitive_all) == 0: continue
+
         primitive_points_a = primitive_point_projection(pf_a, idx_a, primitive_all)
         primitive_points_b = primitive_point_projection(pf_b, idx_b, primitive_all)
-        
+
         positive_entry, negative_entry = IM_entry_calculation(
             pf_a, idx_a, pf_b, idx_b, primitive_points_a, primitive_points_b, hybrid_result
         )
 
-        # Track the worst-case collision found so far
         max_pos = max(max_pos, positive_entry)
         max_neg = max(max_neg, negative_entry)
 
-        # If both directions are fully blocked, stop checking triangles!
-        if max_pos == 2 and max_neg == 2:
-            break 
-            
+        if max_pos == 2 and max_neg == 2: break
+
     return max_pos, max_neg
 
 
@@ -559,6 +524,7 @@ def evaluate_pair_interference(part_a_data, part_b_data, extraction_axis):
     overlap_region, overlap_result = check_2d_aabb_overlap(
         part_a_aux.bounding_box.bounds, part_b_aux.bounding_box.bounds, extraction_axis
     )
+    print(f'\tAABB Overlap Result: {overlap_result}')
     
     # Return immediately if the broad phase gives a definitive answer
     if overlap_result == 0: return 0, 0
@@ -574,12 +540,24 @@ def evaluate_pair_interference(part_a_data, part_b_data, extraction_axis):
 
     max_pos, max_neg = 0, 0
     full_interference = False
-    
+    # plotter = pv.Plotter()
+    # visualize_pseudofaces(part_a_aux, pseudo_faces_a, plotter, 1)
+    # visualize_pseudofaces(part_b_aux, pseudo_faces_b, plotter, 2, show = True)
+    current_pf_intersect = [0, 0]
     for pf_a, pf_b in product(pseudo_faces_a, pseudo_faces_b):
-        if full_interference: break
+        if full_interference:
+            print(f'\tFull PF Interference Detected')
+            break
             
         pf_intersect = check_PF_overlap(pf_a, pf_b)
+        
         final_pos, final_neg = pf_intersect
+        if final_pos == 2 and final_pos != current_pf_intersect[0] and -2 not in pf_intersect:
+            current_pf_intersect[0] = final_pos
+            print(f'\tPF Overlap Update: max_pos {final_pos}')
+        if final_neg == 2 and final_neg != current_pf_intersect[1] and -2 not in pf_intersect:
+            current_pf_intersect[1] = final_neg
+            print(f'\tPF Overlap Update: max_neg {final_neg}')
 
         if -2 in pf_intersect:
             for attempt in ["focus_facets", "full_fallback"]:
@@ -593,15 +571,20 @@ def evaluate_pair_interference(part_a_data, part_b_data, extraction_axis):
                 c_pos, c_neg = evaluate_narrow_phase(
                     candidates_a, candidates_b, pf_a, pf_b, part_a_aux, part_b_aux, use_MRT
                 )
+                if final_pos > max_pos:
+                    print(f'\tNarrow Phase update: max_pos {final_pos}')
+                if final_neg > max_neg:
+                    print(f'\tNarrow Phase update: max_neg {final_neg}')
                 
                 final_pos, final_neg = max(final_pos, c_pos), max(final_neg, c_neg)
-                if final_pos == 2 and final_neg == 2: break 
-
+                if final_pos == 2 and final_neg == 2: 
+                    break 
+        
         max_pos, max_neg = max(max_pos, final_pos), max(max_neg, final_neg)
         if max_pos == 2 and max_neg == 2:
             full_interference = True
             break
-
+    
     return max_pos, max_neg
 
 def calculate_IM_matrices(assembly_manifest):
@@ -619,6 +602,9 @@ def calculate_IM_matrices(assembly_manifest):
             
             part_a_data = assembly_manifest[part_a_name]
             part_b_data = assembly_manifest[part_b_name]
+
+            # Log the pair checking
+            print(f'Moving: {part_a_name}, Static: {part_b_name}')
 
             # Names perfectly synced with the updated helper function
             pos_val, neg_val = evaluate_pair_interference(
@@ -660,58 +646,69 @@ def clean_obb_matrix(to_origin, tolerance=0.05):
     matrix[:3, :3] = perfect_rot
     return matrix
 
-def load_assembly_from_folder(folder_path):
+def load_assembly_from_folder(folder_path, bounding_box_type="OBB"):
+    """
+    bounding_box_type: 'OBB' (Oriented, uses PCA to find axes) 
+                    or 'AABB' (Axis-Aligned, uses global CAD axes)
+    """
     assembly_manifest = {}
     matrix_idx = 0
     
-    # 1. Gather and sort all STL files in the directory alphabetical order
     folder = Path(folder_path)
     stl_files = sorted(list(folder.glob("*.stl")))
     
-    # 2. Iterate through the sorted files to build your dictionary
     for file_path in stl_files:
-        raw_name = file_path.stem  # e.g., "Ensamblaje1 - Lid-1"
-        
-        # Split the string at the hyphen and keep only the last part
+        raw_name = file_path.stem 
         if " - " in raw_name:
-            part_name = raw_name.split(" - ")[-1].strip() # Becomes "Lid-1"
+            part_name = raw_name.split(" - ")[-1].strip() 
         else:
             part_name = raw_name
         
-        # Load the mesh geometry
         mesh_geom = trimesh.load(str(file_path))
-
         mesh_geom.merge_vertices()
         
-        # Get the Oriented Bounding Box transformation matrix
-        to_origin, extents = trimesh.bounds.oriented_bounds(mesh_geom)
-        
-        # ---> Clean the matrix and re-orthogonalize it! <---
-        to_origin = clean_obb_matrix(to_origin)
-        
-        # Because the matrix is now mathematically perfect, the inverse will be flawless
-        from_origin = np.linalg.inv(to_origin)
+        if bounding_box_type == "OBB":
+            # Get the Oriented Bounding Box transformation matrix
+            to_origin, extents = trimesh.bounds.oriented_bounds(mesh_geom)
+            
+            # Clean the matrix and re-orthogonalize it
+            to_origin = clean_obb_matrix(to_origin)
+            from_origin = np.linalg.inv(to_origin)
+            
+            v_x = from_origin[:3, 0]
+            v_y = from_origin[:3, 1]
+            v_z = from_origin[:3, 2]
+            
+        elif bounding_box_type == "AABB":
+            # Pure Translation (No Rotation, perfectly aligned to CAD axes)
+            center = mesh_geom.bounding_box.centroid
+            
+            to_origin = np.eye(4) 
+            to_origin[:3, 3] = -center
+            from_origin = np.linalg.inv(to_origin)
+            
+            # Because there is no rotation, extraction vectors are exactly global
+            v_x = np.array([1.0, 0.0, 0.0])
+            v_y = np.array([0.0, 1.0, 0.0])
+            v_z = np.array([0.0, 0.0, 1.0])
+            
+        else:
+            raise ValueError("bounding_box_type must be either 'OBB' or 'AABB'")
 
-        # Structure the inner data dictionary
         extraction_vectors = {
-            "+x": from_origin[:3, 0],
-            "-x": -from_origin[:3, 0],
-            "+y": from_origin[:3, 1],
-            "-y": -from_origin[:3, 1],
-            "+z": from_origin[:3, 2],
-            "-z": -from_origin[:3, 2]
+            "+x": v_x, "-x": -v_x,
+            "+y": v_y, "-y": -v_y,
+            "+z": v_z, "-z": -v_z
         }
 
-        # Structure the inner data dictionary
         assembly_manifest[part_name] = {
             "matrix_idx": matrix_idx,
             "part_mesh": mesh_geom,
-            "to_origin": to_origin,              # Store this to speed up the main loop!
+            "to_origin": to_origin,             
             "extraction_vectors": extraction_vectors,
-            "center_point": from_origin[:3, 3]   # The exact center of the OBB
+            "center_point": from_origin[:3, 3]   
         }
         
-        # Move to the next index slot
         matrix_idx += 1
         
     return assembly_manifest
@@ -795,7 +792,7 @@ def export_directions_to_excel(assembly_manifest, output_folder="output_matrices
     print(f"Successfully saved Robot Extraction Vectors to: {filepath}")
 
 ## Auxiliary visualization Functions with pyvista
-def visualize_pseudofaces(part, pseudo_faces_list):
+def visualize_pseudofaces(part, pseudo_faces_list, plotter, color_idx, show = False):
     """
     Renders the full part in transparent gray, and paints each 
     Pseudo Face object a different solid color.
@@ -804,7 +801,7 @@ def visualize_pseudofaces(part, pseudo_faces_list):
     mesh = pv.wrap(part)
     
     # 2. Set up the 3D window
-    pl = pv.Plotter()
+    pl = plotter
     
     # 3. Draw the original part as a faint "ghost" for context
     pl.add_mesh(mesh, color='white', opacity=0.15)
@@ -819,19 +816,25 @@ def visualize_pseudofaces(part, pseudo_faces_list):
         pf_mesh = mesh.extract_cells(pf.face_indices)
         
         # Pick a color (loops back to the start if you have more than 7 PFs)
+        # c = colors[i % len(colors)]
         c = colors[i % len(colors)]
         
         # Draw this specific PF solid and show its black triangle edges
         pl.add_mesh(pf_mesh, color=c, show_edges=True, line_width=1)
         
     # Show the interactive window!
-    pl.show()
+    if show:
+        pl.show()
 
 def visualize_part_axes(part_name, assembly_manifest):
     """
     Visualizes a specific part in its original global position 
     and draws its extraction axes based on its OBB.
     """
+
+    # X axis: red
+    # Y axis: green
+    # Z axis: blue
     properties = assembly_manifest[part_name]
     mesh = properties["part_mesh"]
     center = properties["center_point"]
@@ -871,21 +874,45 @@ def visualize_narrow_phase(pseudo_faces, overlap_region, plotter, index, show = 
 # For the loop i need to revert the transformation applied to part_b so i
 # can get extraction directions in the original frame
 if __name__ == "__main__":
-    assembly_manifest = load_assembly_from_folder('STLs/EndEffector')
+    # Change this whenever you test a new assembly
+    input_folder = 'STLs/EndEffector'
     
-    # 1. VISUALIZE FIRST! 
-    # Grab the name of the first part and visualize its axes
-    first_part = list(assembly_manifest.keys())[0]
-    visualize_part_axes(first_part, assembly_manifest)
+    # Extract the assembly name dynamically (e.g., "EndEffector")
+    assembly_name = Path(input_folder).name
     
-    # 2. RUN THE HEAVY MATH
-    start_time = time.time()
-    final_matrices = calculate_IM_matrices(assembly_manifest)
-    export_matrices_to_excel(final_matrices, assembly_manifest)
-    print(f"--- Time Taken: {(time.time() - start_time):.2f} seconds ---")
+    # Define dynamic output paths
+    out_obb = f"Outputs_{assembly_name}/OBB"
+    out_aabb = f"Outputs_{assembly_name}/AABB"
+    
+    # =======================================================
+    #                 RUN 1: OBB PIPELINE
+    # =======================================================
+    # print(f"\n[STARTING] OBB Pipeline for: {assembly_name}...")
+    # assembly_manifest_OBB = load_assembly_from_folder(input_folder, bounding_box_type="OBB")
+    
+    # start_time = time.time()
+    # final_matrices_OBB = calculate_IM_matrices(assembly_manifest_OBB)
+    # print(f"--- OBB Math Complete! Time Taken: {(time.time() - start_time):.2f} seconds ---")
+    
+    # export_matrices_to_excel(final_matrices_OBB, assembly_manifest_OBB, output_folder=out_obb)
+    # export_directions_to_excel(assembly_manifest_OBB, output_folder=out_obb)
 
-    # 3. EXPORT THE ROBOT VECTORS
-    export_directions_to_excel(assembly_manifest)
+
+    # =======================================================
+    #                 RUN 2: AABB PIPELINE
+    # =======================================================
+    print(f"\n[STARTING] AABB Pipeline for: {assembly_name}...")
+    assembly_manifest_AABB = load_assembly_from_folder(input_folder, bounding_box_type="AABB")
+    #visualize_part_axes('Hook_v2-2', assembly_manifest_AABB)
+    
+    start_time = time.time()
+    final_matrices_AABB = calculate_IM_matrices(assembly_manifest_AABB)
+    print(f"--- AABB Math Complete! Time Taken: {(time.time() - start_time):.2f} seconds ---")
+    
+    export_matrices_to_excel(final_matrices_AABB, assembly_manifest_AABB, output_folder=out_aabb)
+    export_directions_to_excel(assembly_manifest_AABB, output_folder=out_aabb)
+
+    print(f"\n>>> All pipelines finished! Check the '{out_obb}' and '{out_aabb}' folders.")
 
 
 
