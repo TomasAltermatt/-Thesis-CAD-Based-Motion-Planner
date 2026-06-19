@@ -96,23 +96,40 @@ def check_2d_aabb_overlap(bounds_a, bounds_b, extraction_axis):
     #    but can be extracted in the negative direction
     #  2: A cannot be extracted in either direction without colliding with B
 
-def check_COAABB_overlap(a_lims, b_lims, epsilon = 0.09):
-    a_min_u, a_max_u = a_lims[0]
-    a_min_v, a_max_v = a_lims[1]
-    b_min_u, b_max_u = b_lims[0]
-    b_min_v, b_max_v = b_lims[1]
+def check_COAABB_overlap(a_lims, b_lims, epsilon=0.05):
+    # ENGINEERING CAP: Maximum shrink in mm. 
+    # Prevents massive parts from shrinking so much that they sever shallow joints!
+    max_shrink = 0.5 
 
-    # Define lu and lv
-    lu = min(b_max_u - b_min_u, a_max_u - a_min_u)
-    lv = min(b_max_v - b_min_v, a_max_v - a_min_v)
+    # --- PART A CORE CALCULATION ---
+    lua = a_lims[0][1] - a_lims[0][0]
+    lva = a_lims[1][1] - a_lims[1][0]
+    
+    shrink_ua = min(epsilon * lua, max_shrink)
+    shrink_va = min(epsilon * lva, max_shrink)
+    
+    Ua_min_core = a_lims[0][0] + shrink_ua
+    Ua_max_core = a_lims[0][1] - shrink_ua
+    Va_min_core = a_lims[1][0] + shrink_va
+    Va_max_core = a_lims[1][1] - shrink_va
 
-    # Conditions for COAABB overlap
-    cond1 = (a_min_u - b_min_u) >= -epsilon*lu and (b_min_v - a_min_v) >= -epsilon*lv
-    cond2 = (b_max_u - a_max_u) >= -epsilon*lu and (a_max_v - b_max_v) >= -epsilon*lv
-    cond3 = (b_min_u - a_min_u) >= -epsilon*lu and (a_min_v - b_min_v) >= -epsilon*lv
-    cond4 = (a_max_u - b_max_u) >= -epsilon*lu and (b_max_v - a_max_v) >= -epsilon*lv
+    # --- PART B CORE CALCULATION ---
+    lub = b_lims[0][1] - b_lims[0][0]
+    lvb = b_lims[1][1] - b_lims[1][0]
+    
+    shrink_ub = min(epsilon * lub, max_shrink)
+    shrink_vb = min(epsilon * lvb, max_shrink)
+    
+    Ub_min_core = b_lims[0][0] + shrink_ub
+    Ub_max_core = b_lims[0][1] - shrink_ub
+    Vb_min_core = b_lims[1][0] + shrink_vb
+    Vb_max_core = b_lims[1][1] - shrink_vb
 
-    return (cond1 and cond2) or (cond3 and cond4)
+    # --- TRUE 2D INTERSECTION MATH ---
+    overlap_u = (Ua_min_core <= Ub_max_core) and (Ua_max_core >= Ub_min_core)
+    overlap_v = (Va_min_core <= Vb_max_core) and (Va_max_core >= Vb_min_core)
+    
+    return overlap_u and overlap_v
 
 
 ## Pseudo Face overlap test functions 
@@ -479,9 +496,8 @@ def IM_entry_calculation(pf_a, facet_idx_a, pf_b, facet_idx_b, primitive_points_
 
 def evaluate_narrow_phase(candidates_a, candidates_b, pf_a, pf_b, part_a_aux, part_b_aux, use_MRT):
     max_pos, max_neg = 0, 0
-
+    
     for idx_a, idx_b in product(candidates_a, candidates_b):
-        # FAST 2D AABB CULLING
         min_a = pf_a.triangles_2d[idx_a].min(axis=0)
         max_a = pf_a.triangles_2d[idx_a].max(axis=0)
         min_b = pf_b.triangles_2d[idx_b].min(axis=0)
@@ -493,17 +509,30 @@ def evaluate_narrow_phase(candidates_a, candidates_b, pf_a, pf_b, part_a_aux, pa
 
         poly_a = Polygon(pf_a.triangles_2d[idx_a])
         poly_b = Polygon(pf_b.triangles_2d[idx_b])
+        
+        # ---> THE GRAZING EDGE FIX <---
+        # Make sure they actually intersect first to avoid Shapely topology errors
+        if not poly_a.intersects(poly_b):
+            continue
+            
+        overlap_poly = poly_a.intersection(poly_b)
+        if overlap_poly.area < 1e-5:
+            continue
 
+        # ---> THE CONSISTENCY FIX <---
+        # Passing the correct 3 arguments exactly as your function requires!
         hybrid_result = hybrid_facet_intersection_test(poly_a, poly_b, use_MRT)
-        if hybrid_result not in [1, 2]: continue
+        
+        if hybrid_result not in [1, 2]:
+            continue
 
-        # ---> RESTORED PRIMITIVE POINTS <---
         primitive_all = get_primitive_points(poly_a, poly_b)
-        if len(primitive_all) == 0: continue
+        if len(primitive_all) == 0:
+            continue
 
         primitive_points_a = primitive_point_projection(pf_a, idx_a, primitive_all)
         primitive_points_b = primitive_point_projection(pf_b, idx_b, primitive_all)
-
+        
         positive_entry, negative_entry = IM_entry_calculation(
             pf_a, idx_a, pf_b, idx_b, primitive_points_a, primitive_points_b, hybrid_result
         )
@@ -511,8 +540,9 @@ def evaluate_narrow_phase(candidates_a, candidates_b, pf_a, pf_b, part_a_aux, pa
         max_pos = max(max_pos, positive_entry)
         max_neg = max(max_neg, negative_entry)
 
-        if max_pos == 2 and max_neg == 2: break
-
+        if max_pos == 2 and max_neg == 2:
+            break 
+            
     return max_pos, max_neg
 
 
