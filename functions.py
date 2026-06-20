@@ -78,9 +78,9 @@ def check_2d_aabb_overlap(bounds_a, bounds_b, extraction_axis):
 
     overlap_result = None
     if a_min_w > b_max_w + DISTANCE_TOL:
-         overlap_result = -1 
+         overlap_result = -2 
     elif b_min_w > a_max_w + DISTANCE_TOL:
-        overlap_result = 1   
+        overlap_result = -2   
     else:
         overlap_result = -2   
 
