@@ -10,8 +10,8 @@ from classes import PseudoFace
 from shapely.geometry import Polygon, MultiPolygon, GeometryCollection, LineString, Point
 from itertools import product, permutations
 
-ANGLE_NORMAL_TOL = 0.95
-DISTANCE_TOL = 1e-4
+ANGLE_NORMAL_TOL = 0.2
+DISTANCE_TOL = 2e-4
 
 # ----------------------------------------------------- MAIN FUNCTIONS ----------------------------------------------
 ## AABB overlap test functions
@@ -454,7 +454,7 @@ def IM_entry_calculation(pf_a, facet_idx_a, pf_b, facet_idx_b, primitive_points_
 
     a_ij, a_ji = 0, 0
     
-    w_tol = 0.05 # 0.05mm depth tolerance prevents CAD micro-overlap errors
+    w_tol = 0.0002 # 0.05mm depth tolerance prevents CAD micro-overlap errors
     n_tol = ANGLE_NORMAL_TOL # 0.05 normal tolerance (~3 degrees) mathematically ignores mesh noise on sliding rails
 
     for i in range(primitive_points_a.shape[0]):
@@ -903,7 +903,7 @@ def visualize_narrow_phase(pseudo_faces, overlap_region, plotter, index, show = 
 # can get extraction directions in the original frame
 if __name__ == "__main__":
     # Change this whenever you test a new assembly
-    input_folder = 'STLs/EndEffector'
+    input_folder = 'STLs/EndEffector2'
     
     # Extract the assembly name dynamically (e.g., "EndEffector")
     assembly_name = Path(input_folder).name
