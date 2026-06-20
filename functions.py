@@ -135,6 +135,7 @@ def create_PFs(part: trimesh.Trimesh, extraction_axis: str, tolerance = ANGLE_NO
     axis_idx = {"x": 0, "y": 1, "z": 2}
     w_idx = axis_idx[extraction_axis]
 
+    # Gives unit normal vector that goes in extraction direction
     normals_w = part.face_normals[:, w_idx]
 
     # Strict Directional Separation 
@@ -167,6 +168,92 @@ def create_PFs(part: trimesh.Trimesh, extraction_axis: str, tolerance = ANGLE_NO
     # Convert to a list to ensure compatibility with your PseudoFace class
     return [PseudoFace(part, list(c), extraction_axis) for c in components if len(c) > 0]
 
+# def check_PF_overlap(pf_a: PseudoFace, pf_b: PseudoFace):
+#     result = [0, 0] 
+#     w_idx = pf_a.extraction_axis
+
+#     a_min_u, a_min_v = pf_a.triangles_2d.min(axis=(0,1))
+#     a_max_u, a_max_v = pf_a.triangles_2d.max(axis=(0,1))
+#     a_min_w = pf_a.triangles_3d[:, :, w_idx].min()
+#     a_max_w = pf_a.triangles_3d[:, :, w_idx].max()
+
+#     b_min_u, b_min_v = pf_b.triangles_2d.min(axis=(0,1))
+#     b_max_u, b_max_v = pf_b.triangles_2d.max(axis=(0,1))
+#     b_min_w = pf_b.triangles_3d[:, :, w_idx].min()
+#     b_max_w = pf_b.triangles_3d[:, :, w_idx].max()
+
+#     overlap_min_u = max(a_min_u, b_min_u)
+#     overlap_max_u = min(a_max_u, b_max_u)
+#     overlap_min_v = max(a_min_v, b_min_v)
+#     overlap_max_v = min(a_max_v, b_max_v)
+
+#     # ---> X-AXIS FIX: REVERTED TO <= <---
+#     if not ((overlap_min_u <= overlap_max_u) and (overlap_min_v <= overlap_max_v)):
+#         return [0, 0] 
+    
+#     a_lims = [(a_min_u, a_max_u), (a_min_v, a_max_v)]
+#     b_lims = [(b_min_u, b_max_u), (b_min_v, b_max_v)]
+#     coaabb_overlap = check_COAABB_overlap(a_lims, b_lims)
+
+#     if not coaabb_overlap:
+#         return [0, 0] 
+
+#     # ---> EXACT SHAPELY OVERLAP FILTER <---
+#     # Destroys the "CameraBase Hole" paradox by checking exact polygons, not AABBs!
+#     min_b_all = pf_b.triangles_2d.min(axis=1)
+#     max_b_all = pf_b.triangles_2d.max(axis=1)
+
+#     actual_overlap = False
+#     for tri_a in pf_a.triangles_2d:
+#         min_a = tri_a.min(axis=0)
+#         max_a = tri_a.max(axis=0)
+        
+#         # Fast Array AABB pre-check to save time
+#         overlap_u = (min_a[0] <= max_b_all[:, 0]) & (max_a[0] >= min_b_all[:, 0])
+#         overlap_v = (min_a[1] <= max_b_all[:, 1]) & (max_a[1] >= min_b_all[:, 1])
+
+#         candidate_b_indices = np.where(overlap_u & overlap_v)[0]
+        
+#         # Only build Shapely Polygons for the bounding boxes that actually touch
+#         if len(candidate_b_indices) > 0:
+#             poly_a = Polygon(tri_a)
+#             for idx_b in candidate_b_indices:
+#                 poly_b = Polygon(pf_b.triangles_2d[idx_b])
+#                 if poly_a.intersects(poly_b):
+#                     actual_overlap = True
+#                     break
+#         if actual_overlap:
+#             break
+
+#     if not actual_overlap:
+#         return [0, 0] 
+
+#     # -------------------------------------------------------------
+#     # YOUR 2s ARE EXACTLY AS YOU WROTE THEM. NO -2s.
+#     # -------------------------------------------------------------
+#     if a_max_w >= b_min_w and a_min_w <= b_max_w:
+#         return [-2, -2]  
+
+#     # ---> THE NORMAL CHECK FIX <---
+#     # Solves the ZED trailing edge paradox in Y and Z without breaking X!
+#     # Forces the engine to verify the faces are pointing at each other before declaring a crash.
+#     normal_a = pf_a.part.face_normals[pf_a.face_indices[0]][w_idx]
+#     normal_b = pf_b.part.face_normals[pf_b.face_indices[0]][w_idx]
+
+#     if a_min_w > b_max_w + DISTANCE_TOL:
+#         # A is physically "behind" B. 
+#         # A moving forward ONLY crashes if A faces forward and B faces backward.
+#         if normal_a < -0.1 and normal_b > 0.1:
+#             result[1] = 2 
+            
+#     if b_min_w > a_max_w + DISTANCE_TOL:
+#         # B is physically "behind" A.
+#         # A moving backward ONLY crashes if A faces backward and B faces forward.
+#         if normal_a > 0.1 and normal_b < -0.1:
+#             result[0] = 2  
+
+#     return result
+
 def check_PF_overlap(pf_a: PseudoFace, pf_b: PseudoFace):
     result = [0, 0] 
     w_idx = pf_a.extraction_axis
@@ -186,7 +273,6 @@ def check_PF_overlap(pf_a: PseudoFace, pf_b: PseudoFace):
     overlap_min_v = max(a_min_v, b_min_v)
     overlap_max_v = min(a_max_v, b_max_v)
 
-    # ---> X-AXIS FIX: REVERTED TO <= <---
     if not ((overlap_min_u <= overlap_max_u) and (overlap_min_v <= overlap_max_v)):
         return [0, 0] 
     
@@ -198,7 +284,6 @@ def check_PF_overlap(pf_a: PseudoFace, pf_b: PseudoFace):
         return [0, 0] 
 
     # ---> EXACT SHAPELY OVERLAP FILTER <---
-    # Destroys the "CameraBase Hole" paradox by checking exact polygons, not AABBs!
     min_b_all = pf_b.triangles_2d.min(axis=1)
     max_b_all = pf_b.triangles_2d.max(axis=1)
 
@@ -207,13 +292,11 @@ def check_PF_overlap(pf_a: PseudoFace, pf_b: PseudoFace):
         min_a = tri_a.min(axis=0)
         max_a = tri_a.max(axis=0)
         
-        # Fast Array AABB pre-check to save time
         overlap_u = (min_a[0] <= max_b_all[:, 0]) & (max_a[0] >= min_b_all[:, 0])
         overlap_v = (min_a[1] <= max_b_all[:, 1]) & (max_a[1] >= min_b_all[:, 1])
 
         candidate_b_indices = np.where(overlap_u & overlap_v)[0]
         
-        # Only build Shapely Polygons for the bounding boxes that actually touch
         if len(candidate_b_indices) > 0:
             poly_a = Polygon(tri_a)
             for idx_b in candidate_b_indices:
@@ -228,28 +311,48 @@ def check_PF_overlap(pf_a: PseudoFace, pf_b: PseudoFace):
         return [0, 0] 
 
     # -------------------------------------------------------------
-    # YOUR 2s ARE EXACTLY AS YOU WROTE THEM. NO -2s.
+    # THE KINEMATIC DIRECTIONAL CHECK
     # -------------------------------------------------------------
-    if a_max_w >= b_min_w and a_min_w <= b_max_w:
-        return [-2, -2]  
+    normal_a_w = pf_a.part.face_normals[pf_a.face_indices[0]][w_idx]
+    normal_b_w = pf_b.part.face_normals[pf_b.face_indices[0]][w_idx]
 
-    # ---> THE NORMAL CHECK FIX <---
-    # Solves the ZED trailing edge paradox in Y and Z without breaking X!
-    # Forces the engine to verify the faces are pointing at each other before declaring a crash.
-    normal_a = pf_a.part.face_normals[pf_a.face_indices[0]][w_idx]
-    normal_b = pf_b.part.face_normals[pf_b.face_indices[0]][w_idx]
+    # FLUSH TOLERANCE: 
+    # DISTANCE_TOL (0.0002) is too strict for tessellated CAD. 
+    # We use 0.05mm to absorb the natural mesh "criss-crossing" of flush parts.
+    flush_tol = 0.04
 
-    if a_min_w > b_max_w + DISTANCE_TOL:
-        # A is physically "behind" B. 
-        # A moving forward ONLY crashes if A faces forward and B faces backward.
-        if normal_a < -0.1 and normal_b > 0.1:
-            result[1] = 2 
+    # 1. Deep Volume Overlap 
+    # If they overlap by MORE than the flush tolerance, they are truly embedded in each other.
+    if a_max_w > b_min_w + flush_tol and a_min_w < b_max_w - flush_tol:
+        #print('Deep Volume')
+        return [-2, -2]
+
+    # 2. Flush Contact: A is physically "behind" B (within mesh noise)
+    if abs(a_max_w - b_min_w) <= flush_tol:
+        # A pushing forward (+W) hits B ONLY if A faces +W and B faces -W
+        if normal_a_w > ANGLE_NORMAL_TOL and normal_b_w < -ANGLE_NORMAL_TOL:
+            #print('Flush and crash (+)')
+            result[0] = 2
+
+    # 3. Flush Contact: A is physically "ahead" of B (within mesh noise)
+    if abs(a_min_w - b_max_w) <= flush_tol:
+        # A pushing backward (-W) hits B ONLY if A faces -W and B faces +W
+        if normal_a_w < -ANGLE_NORMAL_TOL and normal_b_w > ANGLE_NORMAL_TOL:
+            #print('Flush and crash (-)')
+            result[1] = 2
+
+    # 4. Trailing Edge Checks (A is entirely behind/ahead with a clear gap > 0.05)
+    if b_min_w > a_max_w + flush_tol:
+        # A is behind B. A moves +W to cross the gap and hit B.
+        if normal_a_w > ANGLE_NORMAL_TOL and normal_b_w < -ANGLE_NORMAL_TOL:
+            #print('Crash (+)')
+            result[0] = 2 
             
-    if b_min_w > a_max_w + DISTANCE_TOL:
-        # B is physically "behind" A.
-        # A moving backward ONLY crashes if A faces backward and B faces forward.
-        if normal_a > 0.1 and normal_b < -0.1:
-            result[0] = 2  
+    if a_min_w > b_max_w + flush_tol:
+        # A is ahead of B. A moves -W to cross the gap and hit B.
+        if normal_a_w < -ANGLE_NORMAL_TOL and normal_b_w > ANGLE_NORMAL_TOL:
+            #print('Crash (-)')
+            result[1] = 2  
 
     return result
 
@@ -392,18 +495,22 @@ def get_primitive_points(poly_a: Polygon, poly_b: Polygon):
     overlap = poly_a.intersection(poly_b)
     raw_coords = []
 
+    # Shapely can sometimes return complex geometries when buffering triangles
     if isinstance(overlap, Polygon):
         raw_coords.extend(list(overlap.exterior.coords)[:-1])
     elif isinstance(overlap, MultiPolygon):
         for poly in overlap.geoms:
             raw_coords.extend(list(poly.exterior.coords)[:-1])
     else:
+        # Catches LineStrings, Points, or GeometryCollections that survive the buffer
         if hasattr(overlap, 'coords'):
             raw_coords.extend(list(overlap.coords))
         elif hasattr(overlap, 'geoms'):
             for geom in overlap.geoms:
                 if hasattr(geom, 'coords'):
                     raw_coords.extend(list(geom.coords))
+                elif hasattr(geom, 'exterior'): # Catch Polygons inside Collections
+                    raw_coords.extend(list(geom.exterior.coords)[:-1])
 
     if len(raw_coords) > 0:
         unique_pts = np.unique(np.array(raw_coords), axis=0)
@@ -414,8 +521,8 @@ def get_primitive_points(poly_a: Polygon, poly_b: Polygon):
 def primitive_point_projection(pf, facet_idx, primitive_points):
     global_idx = pf.face_indices[facet_idx]
 
-    clean_axis = str(pf.extraction_axis).lower().replace("+", "").replace("-", "")
-    w_idx = {"x": 0, "y": 1, "z": 2}.get(clean_axis, 0)
+    # THE FIX: It's already an integer!
+    w_idx = pf.extraction_axis
     axes = [0, 1, 2]
     axes.remove(w_idx)
     u_idx, v_idx = axes[0], axes[1]
@@ -446,12 +553,12 @@ def IM_entry_calculation(pf_a, facet_idx_a, pf_b, facet_idx_b, primitive_points_
     global_idx_a = pf_a.face_indices[facet_idx_a]
     global_idx_b = pf_b.face_indices[facet_idx_b]
 
-    clean_axis = str(pf_a.extraction_axis).lower().replace("+", "").replace("-", "")
-    w_idx = {"x": 0, "y": 1, "z": 2}.get(clean_axis, 0)
+    # THE FIX: It's already an integer!
+    w_idx = pf_a.extraction_axis 
 
     normal_a = pf_a.part.face_normals[global_idx_a][w_idx]
     normal_b = pf_b.part.face_normals[global_idx_b][w_idx]
-
+    #print(f'Normal A: {normal_a}, Normal B: {normal_b}')
     a_ij, a_ji = 0, 0
     
     w_tol = 0.0002 # 0.05mm depth tolerance prevents CAD micro-overlap errors
@@ -494,13 +601,19 @@ def evaluate_narrow_phase(candidates_a, candidates_b, pf_a, pf_b, part_a_aux, pa
         poly_a = Polygon(pf_a.triangles_2d[idx_a])
         poly_b = Polygon(pf_b.triangles_2d[idx_b])
         
-        # ---> THE GRAZING EDGE FIX <---
-        # Make sure they actually intersect first to avoid Shapely topology errors
-        if not poly_a.intersects(poly_b):
+        # Micro-buffer to force tangents to overlap
+        buf_tol = 1e-4
+        poly_a_buf = poly_a.buffer(buf_tol)
+        poly_b_buf = poly_b.buffer(buf_tol)
+
+        if not poly_a_buf.intersects(poly_b_buf):
             continue
             
-        overlap_poly = poly_a.intersection(poly_b)
-        if overlap_poly.area < 1e-5:
+        overlap_poly = poly_a_buf.intersection(poly_b_buf)
+        
+        # Remove the strict area < 1e-5 check. 
+        # The buffer guarantees that if they touch, there is geometry.
+        if overlap_poly.is_empty:
             continue
 
         # ---> THE CONSISTENCY FIX <---
@@ -526,7 +639,7 @@ def evaluate_narrow_phase(candidates_a, candidates_b, pf_a, pf_b, part_a_aux, pa
 
         if max_pos == 2 and max_neg == 2:
             break 
-            
+
     return max_pos, max_neg
 
 
@@ -630,6 +743,9 @@ def calculate_IM_matrices(assembly_manifest):
             
             part_a_data = assembly_manifest[part_a_name]
             part_b_data = assembly_manifest[part_b_name]
+
+            # if 'CameraBase_v2-3-1' not in {part_a_name, part_b_name} :
+            #     continue
 
             # Log the pair checking
             print(f'Moving: {part_a_name}, Static: {part_b_name}')
