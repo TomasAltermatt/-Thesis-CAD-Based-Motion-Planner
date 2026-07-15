@@ -6,7 +6,7 @@ import os
 import pandas as pd
 import time
 from pathlib import Path
-from classes import PseudoFace
+from .classes import PseudoFace
 from shapely.geometry import Polygon, MultiPolygon, GeometryCollection, LineString, Point
 from itertools import product, permutations
 
